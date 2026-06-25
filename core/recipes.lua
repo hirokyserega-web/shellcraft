@@ -235,6 +235,100 @@ function recipes:learnFromTurtle()
     return true, recipe
 end
 
+--- Обучить рецепт из подключенного хранилища (сундук/бочка).
+-- Первые 3 ряда (слоты 1-27) используются для 3x3 сетки крафта.
+-- Любой предмет вне колонок сетки крафта (или ниже 3 ряда) считается результатом.
+-- @param invName имя периферии хранилища
+-- @return true, recipe | false, ошибка
+function recipes:learnFromStorage(invName)
+    local p = peripheral.wrap(invName)
+    if not p or type(p.list) ~= "function" or type(p.size) ~= "function" then
+        return false, "invalid storage peripheral"
+    end
+    
+    local size = p.size()
+    local inventoryList = p.list()
+    
+    -- Ищем колонки рецепта (в пределах первых 3 рядов)
+    local colMin = 9
+    local hasRecipeItems = false
+    for slot = 1, math.min(27, size) do
+        local item = inventoryList[slot]
+        if item then
+            local col = (slot - 1) % 9 + 1
+            if col < colMin then
+                colMin = col
+            end
+            hasRecipeItems = true
+        end
+    end
+    
+    if not hasRecipeItems then
+        return false, "no items found in first 3 rows of storage"
+    end
+    
+    if colMin > 7 then
+        colMin = 7
+    end
+    
+    local gridCols = {
+        [colMin] = 1,
+        [colMin + 1] = 2,
+        [colMin + 2] = 3
+    }
+    
+    local pattern = {}
+    for r = 1, 3 do
+        pattern[r] = {}
+        for c = 1, 3 do
+            pattern[r][c] = nil
+        end
+    end
+    
+    local outputSlot = nil
+    local outputItem = nil
+    
+    for slot = 1, size do
+        local item = inventoryList[slot]
+        if item then
+            local row = math.floor((slot - 1) / 9) + 1
+            local col = (slot - 1) % 9 + 1
+            
+            local isRecipeSlot = (row <= 3) and gridCols[col]
+            if isRecipeSlot then
+                local gridCol = gridCols[col]
+                pattern[row][gridCol] = { id = item.name, count = item.count or 1 }
+            else
+                if not outputSlot then
+                    outputSlot = slot
+                    outputItem = item
+                end
+            end
+        end
+    end
+    
+    if not outputSlot or not outputItem then
+        return false, "could not find output item (place it outside the 3x3 crafting grid columns)"
+    end
+    
+    local displayName = nil
+    local ok, detail = pcall(p.getItemDetail, outputSlot)
+    if ok and detail and detail.displayName then
+        displayName = detail.displayName
+    end
+    
+    local recipe = {
+        id = outputItem.name,
+        name = displayName or outputItem.name,
+        type = "shaped",
+        output = outputItem.count or 1,
+        pattern = pattern,
+    }
+    
+    self:add(recipe)
+    return true, recipe
+end
+
 ----------------------------------------------------------------
 -- ВРЕМЯ КРАФТА
 ----------------------------------------------------------------

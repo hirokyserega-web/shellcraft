@@ -436,6 +436,67 @@ function ui:renderRecipes(yTop, yBot, w)
     local recipes = self.deps.recipes
     local list = recipes:all()
     local h = yBot - yTop + 1
+    
+    if st.mode == "learn_select" then
+        term.setTextColor(colors.cyan)
+        widgets.box(2, yTop, w - 2, yBot - yTop + 1, "Select Learn Source", "double")
+        
+        local src = st.sources or {}
+        if #src == 0 then
+            widgets.center(yTop + 2, "No sources available", colors.red, colors.black)
+            widgets.center(yTop + 3, "Attach chest or run on turtle", colors.gray, colors.black)
+            self:button(math.floor((w - 12) / 2) + 1, yBot - 1, 12, "Cancel", false, function()
+                st.mode = "list"
+            end, { bg = colors.red })
+            return
+        end
+        
+        -- Draw source list
+        local rows = {}
+        for _, s in ipairs(src) do
+            table.insert(rows, s.label)
+        end
+        local listH = yBot - yTop + 1 - 4
+        widgets.list(3, yTop + 2, w - 4, listH, rows, st.sourceScroll or 0, st.selectedSource)
+        
+        -- Buttons for Up / Down if list overflows
+        if #rows > listH then
+            self:button(w - 7, yTop + 2, 4, "Up", false, function()
+                st.sourceScroll = math.max(0, (st.sourceScroll or 0) - 1)
+            end)
+            self:button(w - 7, yBot - 2, 4, "Dn", false, function()
+                if (st.sourceScroll or 0) + listH < #rows then
+                    st.sourceScroll = (st.sourceScroll or 0) + 1
+                end
+            end)
+        end
+        
+        -- Learn / Cancel
+        local btnW = 10
+        local startX = math.floor((w - (btnW * 2 + 2)) / 2) + 1
+        self:button(startX, yBot - 1, btnW, "Learn", true, function()
+            local selected = src[st.selectedSource]
+            if selected then
+                local ok, recipe
+                if selected.id == "turtle" then
+                    ok, recipe = recipes:learnFromTurtle()
+                else
+                    ok, recipe = recipes:learnFromStorage(selected.id)
+                end
+                if ok then
+                    self:addLog("Saved: " .. self.deps.lang.display(recipe.id))
+                else
+                    self:addLog("Error: " .. tostring(recipe))
+                end
+            end
+            st.mode = "list"
+        end, { bgActive = colors.green })
+        self:button(startX + btnW + 2, yBot - 1, btnW, "Cancel", false, function()
+            st.mode = "list"
+        end, { bg = colors.red })
+        return
+    end
+
     local rows = {}
     for _, r in ipairs(list) do
         local name = self.deps.lang.display(r.id, r.name)
@@ -449,8 +510,20 @@ function ui:renderRecipes(yTop, yBot, w)
     end
     -- Кнопки внизу
     self:button(2, yBot - 1, 16, " + Learn ", false, function()
-        self:addLog("Learning: put items into learner turtle crafting grid and press Done")
-        st.mode = "learn"
+        local src = {}
+        if turtle then
+            table.insert(src, { id = "turtle", label = "Turtle Grid" })
+        end
+        for _, name in ipairs(peripheral.getNames()) do
+            local ok, p = pcall(peripheral.wrap, name)
+            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                table.insert(src, { id = name, label = name })
+            end
+        end
+        st.sources = src
+        st.selectedSource = 1
+        st.sourceScroll = 0
+        st.mode = "learn_select"
     end, { bgActive = colors.green })
     self:button(20, yBot - 1, 14, " - Delete ", false, function()
         if list[st.selected] then
@@ -458,18 +531,6 @@ function ui:renderRecipes(yTop, yBot, w)
             self:addLog("Deleted recipe: " .. self.deps.lang.display(list[st.selected].id))
         end
     end, { bg = colors.red })
-    if st.mode == "learn" then
-        widgets.center(yTop, ">>> LEARNING MODE <<<", colors.yellow, colors.black)
-        self:button(w - 16, yTop, 7, " Done ", true, function()
-            local ok, recipe = recipes:learnFromTurtle()
-            if ok then
-                self:addLog("Saved recipe: " .. self.deps.lang.display(recipe.id))
-            else
-                self:addLog("Learning error: " .. tostring(recipe))
-            end
-            st.mode = "list"
-        end, { bgActive = colors.green })
-    end
 end
 
 ----------------------------------------------------------------
@@ -545,8 +606,13 @@ function ui:handleListTouch(x, y)
         list = self.deps.machines.names
         if list[idx] then st.selected = idx end
     elseif tab == "recipes" then
-        list = self.deps.recipes:all()
-        if list[idx] then st.selected = idx end
+        if st.mode == "learn_select" then
+            local list = st.sources or {}
+            if list[idx] then st.selectedSource = idx end
+        else
+            list = self.deps.recipes:all()
+            if list[idx] then st.selected = idx end
+        end
     end
 end
 
@@ -593,7 +659,13 @@ end
 
 function ui:moveSelection(delta)
     local st = self.state[self.activeTab]
-    if not st or not st.selected then return end
+    if not st then return end
+    if self.activeTab == "recipes" and st.mode == "learn_select" then
+        local list = st.sources or {}
+        st.selectedSource = util.clamp((st.selectedSource or 1) + delta, 1, math.max(1, #list))
+        return
+    end
+    if not st.selected then return end
     local list
     if self.activeTab == "craft" then list = self.deps.recipes:all()
     elseif self.activeTab == "storage" then list = self.deps.storage:items()

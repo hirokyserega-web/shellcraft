@@ -62,7 +62,19 @@ function server.run()
     local monitor = nil
     if #cfg.peripherals.monitors > 0 then
         monitor = peripheral.wrap(cfg.peripherals.monitors[1])
-        pcall(monitor.setTextScale, 0.5)
+        local scale = cfg.text_scale
+        if not scale or scale == 1.0 then
+            pcall(monitor.setTextScale, 1.0)
+            local w, h = monitor.getSize()
+            if w >= 58 then
+                scale = 2.0
+            elseif w >= 38 then
+                scale = 1.5
+            else
+                scale = 1.0
+            end
+        end
+        pcall(monitor.setTextScale, scale)
     end
     uiInstance = ui.new(monitor, {
         storage = st, recipes = rec, dispatcher = disp,

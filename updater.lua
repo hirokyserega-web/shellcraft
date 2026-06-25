@@ -53,7 +53,13 @@ end
 --- Скачать текстовый файл с URL.
 -- @return content или nil
 function updater.fetch(url)
-    local response = http.get(url)
+    local t = tostring(math.random(100000, 999999))
+    if os.epoch then
+        pcall(function() t = tostring(os.epoch("utc")) end)
+    end
+    local separator = url:find("%?") and "&" or "?"
+    local busterUrl = url .. separator .. "t=" .. t
+    local response = http.get(busterUrl)
     if not response then return nil end
     local body = response.readAll()
     response.close()

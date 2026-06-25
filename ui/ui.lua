@@ -78,25 +78,21 @@ end
 function ui:drawTabs(y)
     self.tabBounds = {}
     local w, _ = term.getSize()
-    local x = 1
+    term.setBackgroundColor(colors.black)
+    term.setCursorPos(1, y)
+    term.write(string.rep(" ", w))
+    local x = 2
     for _, t in ipairs(self.tabs) do
         local label = " " .. t.title .. " "
         local active = (t.id == self.activeTab)
-        local bg = active and colors.blue or colors.gray
-        local fg = active and colors.white or colors.lightGray
+        local bg = active and colors.lightBlue or colors.gray
+        local fg = active and colors.black or colors.white
         term.setBackgroundColor(bg)
         term.setTextColor(fg)
         term.setCursorPos(x, y)
         term.write(label)
         self.tabBounds[#self.tabBounds + 1] = { x = x, y = y, w = #label, id = t.id }
-        x = x + #label
-    end
-    -- добить строку
-    term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.white)
-    if x <= w then
-        term.setCursorPos(x, y)
-        term.write(string.rep(" ", w - x + 1))
+        x = x + #label + 1
     end
 end
 
@@ -122,33 +118,46 @@ function ui:render()
     term.setTextColor(colors.white)
     term.clear()
 
-    -- Заголовок
-    widgets.center(1, " ShellCraft ", colors.yellow, colors.black)
+    -- Header Bar background (solid gray)
+    term.setBackgroundColor(colors.gray)
+    term.setCursorPos(1, 1)
+    term.write(string.rep(" ", w))
 
-    -- Статус справа в заголовке
+    -- Title left-aligned
+    term.setTextColor(colors.yellow)
+    term.setCursorPos(2, 1)
+    term.write("📦 ShellCraft")
+
+    -- Status right-aligned
     local status = ""
     if self.deps.dispatcher then
         local free = self.deps.dispatcher:freeCount()
         local total = 0
         for _ in pairs(self.deps.dispatcher.workers) do total = total + 1 end
         local active = #self.deps.dispatcher:activeTasks()
-        status = string.format("W:%d/%d A:%d", free, total, active)
+        status = string.format("Workers: %d/%d [Act: %d]", total - free, total, active)
     end
-    term.setTextColor(colors.lightGray)
-    term.setCursorPos(math.max(1, w - #status), 1)
+    term.setTextColor(colors.white)
+    term.setCursorPos(math.max(2, w - #status - 1), 1)
     term.write(status)
 
     -- Вкладки
     self:buildTabs()
     self:drawTabs(2)
 
+    -- Separator line at Row 3
+    term.setCursorPos(1, 3)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.gray)
+    term.write(string.rep("─", w))
+
     -- Контент
     local tab = self.activeTab
-    if tab == "craft" then self:renderCraft(3, h - 1, w)
-    elseif tab == "storage" then self:renderStorage(3, h - 1, w)
-    elseif tab == "machines" then self:renderMachines(3, h - 1, w)
-    elseif tab == "recipes" then self:renderRecipes(3, h - 1, w)
-    elseif tab == "log" then self:renderLog(3, h - 1, w)
+    if tab == "craft" then self:renderCraft(4, h - 1, w)
+    elseif tab == "storage" then self:renderStorage(4, h - 1, w)
+    elseif tab == "machines" then self:renderMachines(4, h - 1, w)
+    elseif tab == "recipes" then self:renderRecipes(4, h - 1, w)
+    elseif tab == "log" then self:renderLog(4, h - 1, w)
     end
 
     -- Подвал: прогресс активного крафта ИЛИ подсказка
@@ -238,67 +247,128 @@ function ui:renderCraft(yTop, yBot, w)
     elseif st.mode == "quantity" then
         local r = list[st.selected]
         if not r then st.mode = "list"; return end
-        widgets.box(2, yTop, w - 4, yBot - yTop + 1, "Craft Order", "double")
+        
+        -- Draw dialog box
+        term.setTextColor(colors.cyan)
+        widgets.box(2, yTop, w - 2, yBot - yTop + 1, "Craft Order", "double")
+        
         local name = self.deps.lang.display(r.id, r.name)
-        widgets.text(4, yTop + 2, "Item: " .. name, colors.white)
-        widgets.text(4, yTop + 3, string.format("Output per craft: %d", r.output or 1), colors.lightGray)
         local inStore = self.deps.storage:count(r.id)
-        widgets.text(4, yTop + 4, "In storage: " .. inStore, colors.lightGray)
-        -- Количество
-        widgets.center(yTop + 6, "Quantity: " .. st.qty, colors.yellow, colors.black)
-        -- Калькулятор потребности + оценка времени
-        local qty = tonumber(st.qty) or 0
-        if qty > 0 then
-            local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage)
-            local bom = planner.calculateBOM(tree)
-            local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
-            widgets.text(4, yTop + 5, "Estimate: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green)
-            local y = yTop + 8
-            widgets.text(4, y, "Requires:", colors.cyan); y = y + 1
-            local any = false
-            for _, info in ipairs(bom) do
-                if y < yBot - 2 then
-                    local have = self.deps.storage:count(info.id)
-                    local col = have >= info.count and colors.green or colors.red
-                    widgets.text(5, y, string.format("  %-20s need:%d have:%d",
-                        self.deps.lang.display(info.id):sub(1, 20), info.count, have), col)
-                    y = y + 1
-                    any = true
+        local qty = tonumber(st.qty) or 1
+        
+        if h < 14 then
+            -- COMPACT LAYOUT for small monitors
+            widgets.text(4, yTop + 1, name:sub(1, w - 6), colors.white, colors.black)
+            widgets.text(4, yTop + 2, string.format("Have: %d  Out: %d", inStore, r.output or 1), colors.lightGray, colors.black)
+            widgets.text(4, yTop + 3, "Quantity: " .. st.qty, colors.yellow, colors.black)
+            
+            -- Buttons row 1 (yTop + 4)
+            local bx = 4
+            self:button(bx, yTop + 4, 4, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
+            self:button(bx + 5, yTop + 4, 4, "+1", false, function() st.qty = tostring(qty + 1) end)
+            self:button(bx + 10, yTop + 4, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
+            self:button(bx + 16, yTop + 4, 6, "Reset", false, function() st.qty = "1" end)
+            
+            -- OK / Cancel (yBot - 1)
+            local okX = math.floor((w - 18) / 2) + 1
+            self:button(okX, yBot - 1, 8, "OK", true, function()
+                local n = tonumber(st.qty) or 0
+                if n > 0 then
+                    local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
+                    if ids then
+                        self:addLog("Order: " .. name .. " x" .. n)
+                        self.state.craft.active = {
+                            total = #ids, done = 0, failed = 0,
+                            started = os.epoch("utc"),
+                        }
+                    else
+                        self:addLog("Error: " .. tostring(err))
+                    end
                 end
-            end
-            if not any then
-                widgets.text(5, y, "  (no base resources required)", colors.lightGray)
-            end
-        end
-        -- Кнопки количества
-        local bx = 4
-        self:button(bx, yBot - 1, 5, " +1 ", false, function() st.qty = tostring((tonumber(st.qty) or 0) + 1) end)
-        self:button(bx + 6, yBot - 1, 6, " +10 ", false, function() st.qty = tostring((tonumber(st.qty) or 0) + 10) end)
-        self:button(bx + 13, yBot - 1, 6, " +64 ", false, function() st.qty = tostring((tonumber(st.qty) or 0) + 64) end)
-        self:button(bx + 20, yBot - 1, 5, " -1 ", false, function() st.qty = tostring(math.max(0, (tonumber(st.qty) or 0) - 1)) end)
-        self:button(bx + 26, yBot - 1, 7, " Reset ", false, function() st.qty = "1" end)
-        -- ОК / Отмена
-        self:button(w - 18, yBot - 1, 7, " OK ", true, function()
-            local n = tonumber(st.qty) or 0
-            if n > 0 then
-                local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
+                st.mode = "list"; st.qty = "1"
+            end, { bgActive = colors.green })
+            self:button(okX + 9, yBot - 1, 8, "Cancel", false, function()
+                st.mode = "list"; st.qty = "1"
+            end, { bg = colors.red })
+            
+        else
+            -- DETAILED LAYOUT for larger monitors
+            widgets.text(4, yTop + 1, "Item: " .. name, colors.white, colors.black)
+            widgets.text(4, yTop + 2, string.format("Output: %d   In Storage: %d", r.output or 1, inStore), colors.lightGray, colors.black)
+            widgets.text(4, yTop + 3, "Quantity: " .. st.qty, colors.yellow, colors.black)
+            
+            -- Estimate
+            if qty > 0 then
+                local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage)
+                local bom = planner.calculateBOM(tree)
                 local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
-                local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
-                if ids then
-                    self:addLog("Order: " .. name .. " x" .. n .. " (" .. #ids .. " steps, " .. planner.formatDuration(estTime, approx) .. ")")
-                    self.state.craft.active = {
-                        total = #ids, done = 0, failed = 0,
-                        etaTotal = estTime, started = os.epoch("utc"),
-                    }
-                else
-                    self:addLog("Order error: " .. tostring(err))
+                widgets.text(4, yTop + 4, "ETA: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green, colors.black)
+                
+                -- Draw BOM list if we have height
+                local y = yTop + 6
+                if h >= 16 then
+                    widgets.text(4, y, "Requires:", colors.cyan, colors.black)
+                    y = y + 1
+                    for _, info in ipairs(bom) do
+                        if y < yBot - 3 then
+                            local have = self.deps.storage:count(info.id)
+                            local col = have >= info.count and colors.green or colors.red
+                            widgets.text(5, y, string.format("  %-16s %d/%d", 
+                                self.deps.lang.display(info.id):sub(1, 16), have, info.count), col, colors.black)
+                            y = y + 1
+                        end
+                    end
                 end
             end
-            st.mode = "list"; st.qty = "1"
-        end, { bgActive = colors.green })
-        self:button(w - 9, yBot - 1, 7, " Cancel ", false, function()
-            st.mode = "list"; st.qty = "1"
-        end, { bg = colors.red })
+            
+            -- Buttons row (yBot - 2)
+            if w >= 39 then
+                local btnW = 5
+                local totalW = 6 * 5 + 5 * 1
+                local startX = math.floor((w - totalW) / 2) + 1
+                self:button(startX, yBot - 2, 5, "-10", false, function() st.qty = tostring(math.max(1, qty - 10)) end)
+                self:button(startX + 6, yBot - 2, 5, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
+                self:button(startX + 12, yBot - 2, 5, "+1", false, function() st.qty = tostring(qty + 1) end)
+                self:button(startX + 18, yBot - 2, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
+                self:button(startX + 24, yBot - 2, 5, "+64", false, function() st.qty = tostring(qty + 64) end)
+                self:button(startX + 30, yBot - 2, 5, "Rst", false, function() st.qty = "1" end)
+            else
+                local startX = math.floor((w - 23) / 2) + 1
+                self:button(startX, yBot - 3, 5, "-10", false, function() st.qty = tostring(math.max(1, qty - 10)) end)
+                self:button(startX + 6, yBot - 3, 5, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
+                self:button(startX + 12, yBot - 3, 5, "+1", false, function() st.qty = tostring(qty + 1) end)
+                self:button(startX + 18, yBot - 3, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
+                
+                local startX2 = math.floor((w - 15) / 2) + 1
+                self:button(startX2, yBot - 2, 7, "+64", false, function() st.qty = tostring(qty + 64) end)
+                self:button(startX2 + 8, yBot - 2, 7, "Reset", false, function() st.qty = "1" end)
+            end
+            
+            -- OK / Cancel (yBot - 1)
+            local okW = 9
+            local startX3 = math.floor((w - (okW * 2 + 2)) / 2) + 1
+            self:button(startX3, yBot - 1, okW, "OK", true, function()
+                local n = tonumber(st.qty) or 0
+                if n > 0 then
+                    local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
+                    local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
+                    local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
+                    if ids then
+                        self:addLog("Order: " .. name .. " x" .. n .. " (" .. #ids .. " steps)")
+                        self.state.craft.active = {
+                            total = #ids, done = 0, failed = 0,
+                            etaTotal = estTime, started = os.epoch("utc"),
+                        }
+                    else
+                        self:addLog("Error: " .. tostring(err))
+                    end
+                end
+                st.mode = "list"; st.qty = "1"
+            end, { bgActive = colors.green })
+            self:button(startX3 + okW + 2, yBot - 1, okW, "Cancel", false, function()
+                st.mode = "list"; st.qty = "1"
+            end, { bg = colors.red })
+        end
     end
 end
 
@@ -458,7 +528,7 @@ function ui:handleListTouch(x, y)
     local tab = self.activeTab
     local st = self.state[tab]
     if not st or not st.selected then return end
-    local yTop = 3
+    local yTop = 4
     local idx = y - yTop + 1 + (st.scroll or 0)
     local list
     if tab == "craft" and self.state.craft.mode == "list" then
@@ -525,9 +595,9 @@ function ui:moveSelection(delta)
     local st = self.state[self.activeTab]
     if not st or not st.selected then return end
     local list
-    if self.activeTab == "craft" then list = self.deps.recipes:list()
+    if self.activeTab == "craft" then list = self.deps.recipes:all()
     elseif self.activeTab == "storage" then list = self.deps.storage:items()
-    elseif self.activeTab == "recipes" then list = self.deps.recipes:list()
+    elseif self.activeTab == "recipes" then list = self.deps.recipes:all()
     else return end
     st.selected = util.clamp(st.selected + delta, 1, math.max(1, #list))
 end

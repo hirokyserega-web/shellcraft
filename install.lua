@@ -38,7 +38,13 @@ local function ensureDir(path)
 end
 
 local function fetch(url)
-    local r = http.get(url)
+    local t = tostring(math.random(100000, 999999))
+    if os.epoch then
+        pcall(function() t = tostring(os.epoch("utc")) end)
+    end
+    local separator = url:find("%?") and "&" or "?"
+    local busterUrl = url .. separator .. "t=" .. t
+    local r = http.get(busterUrl)
     if not r then return nil end
     local body = r.readAll()
     r.close()

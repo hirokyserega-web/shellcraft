@@ -210,7 +210,7 @@ end
 function ui:renderCraft(yTop, yBot, w)
     local st = self.state.craft
     local recipes = self.deps.recipes
-    local list = recipes:list()
+    local list = recipes:all()
     if #list == 0 then
         widgets.center(math.floor((yTop + yBot) / 2), "No recipes. Go to Recipes tab.", colors.red)
         return
@@ -364,7 +364,7 @@ end
 function ui:renderRecipes(yTop, yBot, w)
     local st = self.state.recipes
     local recipes = self.deps.recipes
-    local list = recipes:list()
+    local list = recipes:all()
     local h = yBot - yTop + 1
     local rows = {}
     for _, r in ipairs(list) do
@@ -462,7 +462,7 @@ function ui:handleListTouch(x, y)
     local idx = y - yTop + 1 + (st.scroll or 0)
     local list
     if tab == "craft" and self.state.craft.mode == "list" then
-        list = self.deps.recipes:list()
+        list = self.deps.recipes:all()
         if list[idx] then
             st.selected = idx
             self.state.craft.mode = "quantity"
@@ -475,7 +475,7 @@ function ui:handleListTouch(x, y)
         list = self.deps.machines.names
         if list[idx] then st.selected = idx end
     elseif tab == "recipes" then
-        list = self.deps.recipes:list()
+        list = self.deps.recipes:all()
         if list[idx] then st.selected = idx end
     end
 end

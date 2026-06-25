@@ -17,6 +17,49 @@
 
 local names = {}
 
+local cyr_to_lat = {
+    ["А"] = "A", ["Б"] = "B", ["В"] = "V", ["Г"] = "G", ["Д"] = "D", ["Е"] = "E", ["Ё"] = "Yo", ["Ж"] = "Zh",
+    ["З"] = "Z", ["И"] = "I", ["Й"] = "Y", ["К"] = "K", ["Л"] = "L", ["М"] = "M", ["Н"] = "N", ["О"] = "O",
+    ["П"] = "P", ["Р"] = "R", ["С"] = "S", ["Т"] = "T", ["У"] = "U", ["Ф"] = "F", ["Х"] = "Kh", ["Ц"] = "Ts",
+    ["Ч"] = "Ch", ["Ш"] = "Sh", ["Щ"] = "Shch", ["Ъ"] = "", ["Ы"] = "Y", ["Ь"] = "", ["Э"] = "E", ["Ю"] = "Yu",
+    ["Я"] = "Ya",
+    ["а"] = "a", ["б"] = "b", ["в"] = "v", ["г"] = "g", ["д"] = "d", ["е"] = "e", ["ё"] = "yo", ["ж"] = "zh",
+    ["з"] = "z", ["и"] = "i", ["й"] = "y", ["к"] = "k", ["л"] = "l", ["м"] = "m", ["н"] = "n", ["о"] = "o",
+    ["п"] = "p", ["р"] = "r", ["с"] = "s", ["т"] = "t", ["у"] = "u", ["ф"] = "f", ["х"] = "kh", ["ц"] = "ts",
+    ["ч"] = "ch", ["ш"] = "sh", ["щ"] = "shch", ["ъ"] = "", ["ы"] = "y", ["ь"] = "", ["э"] = "e", ["ю"] = "yu",
+    ["я"] = "ya"
+}
+
+function names.transliterate(str)
+    if not str then return "" end
+    local result = {}
+    local i = 1
+    local len = #str
+    while i <= len do
+        local c = str:sub(i, i)
+        local b = c:byte(1)
+        if b >= 192 and b <= 223 then
+            local utf8_char = str:sub(i, i + 1)
+            local lat = cyr_to_lat[utf8_char]
+            if lat then
+                table.insert(result, lat)
+            else
+                table.insert(result, utf8_char)
+            end
+            i = i + 2
+        else
+            local lat = cyr_to_lat[c]
+            if lat then
+                table.insert(result, lat)
+            else
+                table.insert(result, c)
+            end
+            i = i + 1
+        end
+    end
+    return table.concat(result)
+end
+
 names.CACHE_FILE   = "lang/cache"
 names.MISSING_FILE = "lang/missing.log"
 
@@ -126,6 +169,10 @@ function names.display(id, detail)
     -- 3. Кеш (собранный ранее из getItemDetail)
     if names.cache[s] then
         return names.cache[s]
+    end
+    -- 3.5. Запасной вариант: транслитерация русского имени, если нет оригинального
+    if ru and ru.dict and ru.dict[s] then
+        return names.transliterate(ru.dict[s])
     end
     -- 4. Fallback: красивый ID + лог отсутствия
     names.logMissing(s)

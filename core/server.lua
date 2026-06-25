@@ -63,15 +63,15 @@ function server.run()
     if #cfg.peripherals.monitors > 0 then
         monitor = peripheral.wrap(cfg.peripherals.monitors[1])
         local scale = cfg.text_scale
-        if not scale or scale == 1.0 then
+        if not scale then
             pcall(monitor.setTextScale, 1.0)
             local w, h = monitor.getSize()
             if w >= 78 then
-                scale = 2.0
-            elseif w >= 48 then
                 scale = 1.5
-            else
+            elseif w >= 48 then
                 scale = 1.0
+            else
+                scale = 0.5
             end
         end
         pcall(monitor.setTextScale, scale)

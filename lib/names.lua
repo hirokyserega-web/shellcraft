@@ -164,11 +164,18 @@ function names.display(id, detail)
     local dn = extractDisplay(detail)
     if dn then
         names.cacheName(s, dn)
+        if not names.use_russian_names then
+            return names.transliterate(dn)
+        end
         return dn
     end
     -- 3. Кеш (собранный ранее из getItemDetail)
     if names.cache[s] then
-        return names.cache[s]
+        local cached = names.cache[s]
+        if not names.use_russian_names then
+            return names.transliterate(cached)
+        end
+        return cached
     end
     -- 3.5. Запасной вариант: транслитерация русского имени, если нет оригинального
     if ru and ru.dict and ru.dict[s] then

@@ -329,6 +329,241 @@ function recipes:learnFromStorage(invName)
     return true, recipe
 end
 
+--- Активное обучение рецепта для печи/механизма.
+-- Перемещает 1 предмет из хранилища в механизм, запускает переработку,
+-- забирает результат обратно в хранилище и сохраняет рецепт.
+-- @param storageName имя сундука/бочки с исходным сырьем
+-- @param machineName имя механизма (печки)
+-- @return true, recipe | false, ошибка
+function recipes:activeLearnMachine(storageName, machineName)
+    local pStorage = peripheral.wrap(storageName)
+    local pMachine = peripheral.wrap(machineName)
+    if not pStorage or not pMachine then
+        return false, "invalid storage or machine peripheral"
+    end
+    
+    local storageList = pStorage.list()
+    local inputSlot = nil
+    local inputItem = nil
+    for slot, item in pairs(storageList) do
+        if item then
+            inputSlot = slot
+            inputItem = item
+            break
+        end
+    end
+    if not inputSlot then
+        return false, "storage chest is empty (place the item to process inside it)"
+    end
+    
+    -- Определяем слоты печи
+    local sz = pMachine.size()
+    local mSlots = { input = 1, output = 3 }
+    if sz == 3 then
+        mSlots = { input = 1, output = 3 }
+    elseif sz and sz > 1 then
+        mSlots = { input = 1, output = sz }
+    end
+    
+    -- Очищаем слоты печи
+    local machineList = pMachine.list()
+    if machineList[mSlots.output] then
+        pMachine.pushItems(storageName, mSlots.output)
+    end
+    if machineList[mSlots.input] then
+        pMachine.pushItems(storageName, mSlots.input)
+    end
+    
+    -- Перемещаем 1 сырье
+    local pushed = pStorage.pushItems(machineName, inputSlot, 1, mSlots.input)
+    if pushed == 0 then
+        return false, "could not push item to machine"
+    end
+    
+    -- Ждем завершения (таймаут 60 сек)
+    local outputItemDetail = nil
+    local deadline = os.clock() + 60
+    while os.clock() < deadline do
+        local ok, detail = pcall(pMachine.getItemDetail, mSlots.output)
+        if ok and detail and detail.name then
+            outputItemDetail = detail
+            break
+        end
+        os.sleep(0.5)
+    end
+    
+    if not outputItemDetail then
+        pMachine.pushItems(storageName, mSlots.input) -- возвращаем назад сырье
+        return false, "timeout waiting for machine processing"
+    end
+    
+    -- Забираем результат в сундук
+    pMachine.pushItems(storageName, mSlots.output)
+    
+    local mType = peripheral.getType(machineName)
+    local recipe = {
+        id = outputItemDetail.name,
+        name = outputItemDetail.displayName or outputItemDetail.name,
+        type = "machine",
+        machine = mType,
+        input = { { id = inputItem.name, count = 1 } },
+        output = outputItemDetail.count or 1,
+    }
+    self:add(recipe)
+    return true, recipe
+end
+
+--- Активное обучение крафтового рецепта на удаленной черепахе.
+-- Читает 3x3 раскладку из хранилища, очищает черепаху,
+-- раскладывает ингредиенты в черепаху, посылает Rednet-команду скрафтить,
+-- забирает результат и остатки назад в хранилище и сохраняет рецепт.
+-- @param storageName имя сундука/бочки с ингредиентами
+-- @param workerId ID черепахи-воркера
+-- @param dispatcherObj объект dispatcher
+-- @return true, recipe | false, ошибка
+function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
+    local pStorage = peripheral.wrap(storageName)
+    if not pStorage or type(pStorage.list) ~= "function" or type(pStorage.size) ~= "function" then
+        return false, "invalid storage peripheral"
+    end
+    
+    local turtleName = dispatcherObj:workerName(workerId)
+    if not turtleName then
+        return false, "turtle worker is not attached to the wired modem network"
+    end
+    local pTurtle = peripheral.wrap(turtleName)
+    if not pTurtle then
+        return false, "cannot wrap turtle peripheral: " .. tostring(turtleName)
+    end
+    
+    -- 1. Читаем раскладку из первых 3 рядов сундука
+    local storageSize = pStorage.size()
+    local storageList = pStorage.list()
+    
+    local colMin = 9
+    local hasRecipeItems = false
+    for slot = 1, math.min(27, storageSize) do
+        local item = storageList[slot]
+        if item then
+            local col = (slot - 1) % 9 + 1
+            if col < colMin then colMin = col end
+            hasRecipeItems = true
+        end
+    end
+    if not hasRecipeItems then
+        return false, "no items found in first 3 rows of storage"
+    end
+    if colMin > 7 then colMin = 7 end
+    
+    local gridCols = {
+        [colMin] = 1,
+        [colMin + 1] = 2,
+        [colMin + 2] = 3
+    }
+    
+    local pattern = {}
+    local transfers = {}
+    local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
+    
+    for r = 1, 3 do
+        pattern[r] = {}
+        for c = 1, 3 do
+            pattern[r][c] = nil
+        end
+    end
+    
+    for slot = 1, math.min(27, storageSize) do
+        local item = storageList[slot]
+        if item then
+            local row = math.floor((slot - 1) / 9) + 1
+            local col = (slot - 1) % 9 + 1
+            if gridCols[col] then
+                local gridCol = gridCols[col]
+                pattern[row][gridCol] = { id = item.name, count = 1 }
+                local gridIdx = (row - 1) * 3 + gridCol
+                local turtleSlot = GRID[gridIdx]
+                table.insert(transfers, { srcSlot = slot, dstSlot = turtleSlot })
+            end
+        end
+    end
+    
+    -- Очищаем черепаху в сундук
+    local turtleList = pTurtle.list()
+    for s = 1, 16 do
+        if turtleList[s] then
+            pStorage.pullItems(turtleName, s)
+        end
+    end
+    
+    -- Раскладываем ингредиенты
+    for _, trans in ipairs(transfers) do
+        local pushed = pStorage.pushItems(turtleName, trans.srcSlot, 1, trans.dstSlot)
+        if pushed == 0 then
+            -- Возврат в случае ошибки
+            local currentTurtleList = pTurtle.list()
+            for s = 1, 16 do
+                if currentTurtleList[s] then
+                    pStorage.pullItems(turtleName, s)
+                end
+            end
+            return false, "could not transfer ingredients to turtle slots"
+        end
+    end
+    
+    -- Посылаем запрос крафта по rednet
+    local net = _G.net or require("lib.net")
+    net.send(workerId, net.MSG.LEARN_CRAFT_REQUEST, {})
+    
+    -- Ждем ответа
+    local responseMsg = nil
+    local deadline = os.clock() + 15
+    while os.clock() < deadline do
+        local senderId, msg = net.receive(1)
+        if senderId == workerId and msg.type == net.MSG.LEARN_CRAFT_RESPONSE then
+            responseMsg = msg.payload
+            break
+        end
+    end
+    
+    if not responseMsg then
+        local currentTurtleList = pTurtle.list()
+        for s = 1, 16 do
+            if currentTurtleList[s] then
+                pStorage.pullItems(turtleName, s)
+            end
+        end
+        return false, "timeout waiting for turtle craft response"
+    end
+    
+    if not responseMsg.success then
+        local currentTurtleList = pTurtle.list()
+        for s = 1, 16 do
+            if currentTurtleList[s] then
+                pStorage.pullItems(turtleName, s)
+            end
+        end
+        return false, tostring(responseMsg.error)
+    end
+    
+    -- Забираем все предметы (результат и остатки) назад в сундук
+    local finalTurtleList = pTurtle.list()
+    for s = 1, 16 do
+        if finalTurtleList[s] then
+            pStorage.pullItems(turtleName, s)
+        end
+    end
+    
+    local recipe = {
+        id = responseMsg.name,
+        name = responseMsg.displayName or responseMsg.name,
+        type = "shaped",
+        output = responseMsg.count or 1,
+        pattern = pattern
+    }
+    self:add(recipe)
+    return true, recipe
+end
+
 ----------------------------------------------------------------
 -- ВРЕМЯ КРАФТА
 ----------------------------------------------------------------

@@ -246,6 +246,41 @@ function worker:run()
                     })
                     util.err("Craft error: " .. tostring(res))
                 end
+            elseif msg.type == net.MSG.LEARN_CRAFT_REQUEST then
+                self.core_id = senderId
+                turtle.select(1)
+                local ok2 = turtle.craft(1)
+                if ok2 then
+                    local foundDetail = nil
+                    local foundSlot = nil
+                    for s = 1, 16 do
+                        local det = turtle.getItemDetail(s)
+                        if det and det.name then
+                            foundDetail = det
+                            foundSlot = s
+                            break
+                        end
+                    end
+                    if foundDetail then
+                        net.send(senderId, net.MSG.LEARN_CRAFT_RESPONSE, {
+                            success = true,
+                            name = foundDetail.name,
+                            displayName = foundDetail.displayName,
+                            count = foundDetail.count,
+                            slot = foundSlot,
+                        })
+                    else
+                        net.send(senderId, net.MSG.LEARN_CRAFT_RESPONSE, {
+                            success = false,
+                            error = "could not find crafted item in slots",
+                        })
+                    end
+                else
+                    net.send(senderId, net.MSG.LEARN_CRAFT_RESPONSE, {
+                        success = false,
+                        error = "turtle.craft failed (invalid grid layout)",
+                    })
+                end
             elseif msg.type == net.MSG.PING then
                 net.send(senderId, net.MSG.PONG, { id = os.getComputerID() })
             elseif msg.type == net.MSG.CRAFT_CANCEL then

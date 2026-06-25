@@ -66,9 +66,9 @@ function server.run()
         if not scale or scale == 1.0 then
             pcall(monitor.setTextScale, 1.0)
             local w, h = monitor.getSize()
-            if w >= 58 then
+            if w >= 78 then
                 scale = 2.0
-            elseif w >= 38 then
+            elseif w >= 48 then
                 scale = 1.5
             else
                 scale = 1.0

@@ -9,16 +9,18 @@ net.PROTOCOL = "shellcraft"
 
 --- Типы сообщений.
 net.MSG = {
-    DISCOVER       = "discover",        -- Core ищет воркеров
-    WORKER_HELLO   = "worker_hello",    -- Воркер отвечает Core
-    WORKER_BYE     = "worker_bye",      -- Воркер уходит
-    CRAFT_REQUEST  = "craft_request",   -- Core -> воркер: скрафти N шт
-    CRAFT_CANCEL   = "craft_cancel",    -- Core -> воркер: отмена
-    STATUS         = "status",          -- воркер -> Core: прогресс
-    RESULT         = "result",          -- воркер -> Core: готово/ошибка
-    PING           = "ping",
-    PONG           = "pong",
-    HEARTBEAT      = "heartbeat",
+    DISCOVER             = "discover",        -- Core ищет воркеров
+    WORKER_HELLO         = "worker_hello",    -- Воркер отвечает Core
+    WORKER_BYE           = "worker_bye",      -- Воркер уходит
+    CRAFT_REQUEST        = "craft_request",   -- Core -> воркер: скрафти N шт
+    CRAFT_CANCEL         = "craft_cancel",    -- Core -> воркер: отмена
+    STATUS               = "status",          -- воркер -> Core: прогресс
+    RESULT               = "result",          -- воркер -> Core: готово/ошибка
+    PING                 = "ping",
+    PONG                 = "pong",
+    HEARTBEAT            = "heartbeat",
+    LEARN_CRAFT_REQUEST  = "learn_craft_request",  -- Core -> воркер: сделай крафт из текущей сетки
+    LEARN_CRAFT_RESPONSE = "learn_craft_response", -- воркер -> Core: результат крафта
 }
 
 --- Открыть rednet на всех доступных модемах.

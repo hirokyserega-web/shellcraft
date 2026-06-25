@@ -56,14 +56,14 @@ end
 --- Сгенерировать список вкладок (динамически).
 function ui:buildTabs()
     self.tabs = {
-        { id = "craft",   title = "Крафт" },
-        { id = "storage", title = "Хранилище" },
+        { id = "craft",   title = "Craft" },
+        { id = "storage", title = "Storage" },
     }
     if self.deps.machines and self.deps.machines:count() > 0 then
-        table.insert(self.tabs, { id = "machines", title = "Механизмы" })
+        table.insert(self.tabs, { id = "machines", title = "Machines" })
     end
-    table.insert(self.tabs, { id = "recipes", title = "Рецепты" })
-    table.insert(self.tabs, { id = "log",     title = "Лог" })
+    table.insert(self.tabs, { id = "recipes", title = "Recipes" })
+    table.insert(self.tabs, { id = "log",     title = "Log" })
 end
 
 --- Переключиться на вкладку (если существует).
@@ -132,7 +132,7 @@ function ui:render()
         local total = 0
         for _ in pairs(self.deps.dispatcher.workers) do total = total + 1 end
         local active = #self.deps.dispatcher:activeTasks()
-        status = string.format("В:%d/%d З:%d", free, total, active)
+        status = string.format("W:%d/%d A:%d", free, total, active)
     end
     term.setTextColor(colors.lightGray)
     term.setCursorPos(math.max(1, w - #status), 1)
@@ -194,12 +194,12 @@ function ui:footerHint()
     local tab = self.activeTab
     if tab == "craft" then
         local m = self.state.craft.mode
-        if m == "list" then return "Тап — выбрать рецепт. Q — выход." end
-        return "Тап по цифрам/ОК. Отмена — назад."
-    elseif tab == "storage" then return "Прокрутка тапом по краям. Q — выход."
-    elseif tab == "machines" then return "Тап — обновить статус."
-    elseif tab == "recipes" then return "Тап — выбрать. [+Обучить] — новый рецепт."
-    elseif tab == "log" then return "Прокрутка тапом по краям."
+        if m == "list" then return "Tap - select recipe. Q - exit." end
+        return "Tap digits/OK. Cancel - back."
+    elseif tab == "storage" then return "Scroll by tapping edges. Q - exit."
+    elseif tab == "machines" then return "Tap - refresh status."
+    elseif tab == "recipes" then return "Tap - select. [+Learn] - new recipe."
+    elseif tab == "log" then return "Scroll by tapping edges."
     end
     return ""
 end
@@ -212,7 +212,7 @@ function ui:renderCraft(yTop, yBot, w)
     local recipes = self.deps.recipes
     local list = recipes:list()
     if #list == 0 then
-        widgets.center(math.floor((yTop + yBot) / 2), "Нет рецептов. Перейдите во вкладку «Рецепты».", colors.red)
+        widgets.center(math.floor((yTop + yBot) / 2), "No recipes. Go to Recipes tab.", colors.red)
         return
     end
     if st.mode == "list" then
@@ -221,53 +221,53 @@ function ui:renderCraft(yTop, yBot, w)
         for _, r in ipairs(list) do
             local name = self.deps.lang.display(r.id, r.name)
             local have = self.deps.storage:count(r.id)
-            local type = r.type == "machine" and " [М]" or ""
+            local type = r.type == "machine" and " [M]" or ""
             local tStr = ""
             if r.avgTime then
                 tStr = string.format(" ~%.0fs", r.avgTime * (r.crafts or 1))
             end
-            table.insert(items, string.format("%-22s x%-3d%s есть:%d%s", name:sub(1, 22), r.output or 1, type, have, tStr))
+            table.insert(items, string.format("%-22s x%-3d%s have:%d%s", name:sub(1, 22), r.output or 1, type, have, tStr))
         end
         local h = yBot - yTop + 1
         widgets.list(1, yTop, w, h, items, st.scroll, st.selected)
         -- Кнопки прокрутки
-        self:button(w - 4, yTop, 4, " Вверх ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
-        self:button(w - 4, yBot, 4, " Вниз ", false, function()
+        self:button(w - 4, yTop, 4, " Up ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
+        self:button(w - 4, yBot, 4, " Down ", false, function()
             if st.scroll + h < #items then st.scroll = st.scroll + (h - 2) end
         end)
     elseif st.mode == "quantity" then
         local r = list[st.selected]
         if not r then st.mode = "list"; return end
-        widgets.box(2, yTop, w - 4, yBot - yTop + 1, "Заказ крафта", "double")
+        widgets.box(2, yTop, w - 4, yBot - yTop + 1, "Craft Order", "double")
         local name = self.deps.lang.display(r.id, r.name)
-        widgets.text(4, yTop + 2, "Предмет: " .. name, colors.white)
-        widgets.text(4, yTop + 3, string.format("Выход за крафт: %d", r.output or 1), colors.lightGray)
+        widgets.text(4, yTop + 2, "Item: " .. name, colors.white)
+        widgets.text(4, yTop + 3, string.format("Output per craft: %d", r.output or 1), colors.lightGray)
         local inStore = self.deps.storage:count(r.id)
-        widgets.text(4, yTop + 4, "В хранилище: " .. inStore, colors.lightGray)
+        widgets.text(4, yTop + 4, "In storage: " .. inStore, colors.lightGray)
         -- Количество
-        widgets.center(yTop + 6, "Количество: " .. st.qty, colors.yellow, colors.black)
+        widgets.center(yTop + 6, "Quantity: " .. st.qty, colors.yellow, colors.black)
         -- Калькулятор потребности + оценка времени
         local qty = tonumber(st.qty) or 0
         if qty > 0 then
             local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage)
             local bom = planner.calculateBOM(tree)
             local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
-            widgets.text(4, yTop + 5, "Оценка: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green)
+            widgets.text(4, yTop + 5, "Estimate: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green)
             local y = yTop + 8
-            widgets.text(4, y, "Потребуется:", colors.cyan); y = y + 1
+            widgets.text(4, y, "Requires:", colors.cyan); y = y + 1
             local any = false
             for _, info in ipairs(bom) do
                 if y < yBot - 2 then
                     local have = self.deps.storage:count(info.id)
                     local col = have >= info.count and colors.green or colors.red
-                    widgets.text(5, y, string.format("  %-20s надо:%d есть:%d",
+                    widgets.text(5, y, string.format("  %-20s need:%d have:%d",
                         self.deps.lang.display(info.id):sub(1, 20), info.count, have), col)
                     y = y + 1
                     any = true
                 end
             end
             if not any then
-                widgets.text(5, y, "  (базовых ресурсов не требует)", colors.lightGray)
+                widgets.text(5, y, "  (no base resources required)", colors.lightGray)
             end
         end
         -- Кнопки количества
@@ -276,27 +276,27 @@ function ui:renderCraft(yTop, yBot, w)
         self:button(bx + 6, yBot - 1, 6, " +10 ", false, function() st.qty = tostring((tonumber(st.qty) or 0) + 10) end)
         self:button(bx + 13, yBot - 1, 6, " +64 ", false, function() st.qty = tostring((tonumber(st.qty) or 0) + 64) end)
         self:button(bx + 20, yBot - 1, 5, " -1 ", false, function() st.qty = tostring(math.max(0, (tonumber(st.qty) or 0) - 1)) end)
-        self:button(bx + 26, yBot - 1, 7, " Сброс ", false, function() st.qty = "1" end)
+        self:button(bx + 26, yBot - 1, 7, " Reset ", false, function() st.qty = "1" end)
         -- ОК / Отмена
-        self:button(w - 18, yBot - 1, 7, " ОК ", true, function()
+        self:button(w - 18, yBot - 1, 7, " OK ", true, function()
             local n = tonumber(st.qty) or 0
             if n > 0 then
                 local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
                 local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
                 local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
                 if ids then
-                    self:addLog("Заказ: " .. name .. " x" .. n .. " (" .. #ids .. " шагов, " .. planner.formatDuration(estTime, approx) .. ")")
+                    self:addLog("Order: " .. name .. " x" .. n .. " (" .. #ids .. " steps, " .. planner.formatDuration(estTime, approx) .. ")")
                     self.state.craft.active = {
                         total = #ids, done = 0, failed = 0,
                         etaTotal = estTime, started = os.epoch("utc"),
                     }
                 else
-                    self:addLog("Ошибка заказа: " .. tostring(err))
+                    self:addLog("Order error: " .. tostring(err))
                 end
             end
             st.mode = "list"; st.qty = "1"
         end, { bgActive = colors.green })
-        self:button(w - 9, yBot - 1, 7, " Отмена ", false, function()
+        self:button(w - 9, yBot - 1, 7, " Cancel ", false, function()
             st.mode = "list"; st.qty = "1"
         end, { bg = colors.red })
     end
@@ -309,7 +309,7 @@ function ui:renderStorage(yTop, yBot, w)
     local st = self.state.storage
     local items = self.deps.storage:items()
     -- Поле поиска (верхняя строка контента)
-    widgets.text(1, yTop, "Поиск: " .. st.search .. "_", colors.yellow)
+    widgets.text(1, yTop, "Search: " .. st.search .. "_", colors.yellow)
     local search = st.search:lower()
     -- Фильтрация
     local filtered = {}
@@ -326,15 +326,15 @@ function ui:renderStorage(yTop, yBot, w)
         table.insert(rows, string.format("%-26s x%d", name:sub(1, 26), it.count))
     end
     if #rows == 0 then
-        widgets.center(math.floor((yTop + yBot) / 2), "Ничего не найдено", colors.gray)
+        widgets.center(math.floor((yTop + yBot) / 2), "Nothing found", colors.gray)
         return
     end
     widgets.list(1, yTop + 1, w, h, rows, st.scroll, st.selected)
-    self:button(w - 4, yTop + 1, 4, " Вверх ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
-    self:button(w - 4, yBot, 4, " Вниз ", false, function()
+    self:button(w - 4, yTop + 1, 4, " Up ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
+    self:button(w - 4, yBot, 4, " Down ", false, function()
         if st.scroll + h < #rows then st.scroll = st.scroll + (h - 2) end
     end)
-    self:button(w - 12, yTop, 8, " Очистить ", false, function() st.search = ""; st.scroll = 0; st.selected = 1 end,
+    self:button(w - 12, yTop, 8, " Clear ", false, function() st.search = ""; st.scroll = 0; st.selected = 1 end,
         { bg = colors.red })
 end
 
@@ -348,12 +348,12 @@ function ui:renderMachines(yTop, yBot, w)
     local rows = {}
     for _, name in ipairs(mach.names) do
         local info = mach:status(name)
-        local busy = info.busy and "ЗАНЯТ" or "СВОБ"
+        local busy = info.busy and "BUSY" or "FREE"
         local what = info.cooking and (" (" .. self.deps.lang.display(info.cooking) .. ")") or ""
         table.insert(rows, string.format("%-20s %-6s%s", name:sub(1, 20), busy, what))
     end
     widgets.list(1, yTop, w, h, rows, st.scroll, st.selected)
-    self:button(2, yBot, 14, " Обновить ", false, function()
+    self:button(2, yBot, 14, " Refresh ", false, function()
         -- пересканируем машины (статус обновится при следующем render)
     end)
 end
@@ -373,29 +373,29 @@ function ui:renderRecipes(yTop, yBot, w)
         table.insert(rows, string.format("[%s] %-24s x%d", type, name:sub(1, 24), r.output or 1))
     end
     if #rows == 0 then
-        widgets.center(yTop + 1, "Нет рецептов", colors.gray)
+        widgets.center(yTop + 1, "No recipes", colors.gray)
     else
         widgets.list(1, yTop, w, h - 2, rows, st.scroll, st.selected)
     end
     -- Кнопки внизу
-    self:button(2, yBot - 1, 16, " + Обучить ", false, function()
-        self:addLog("Обучение: положите предметы в верстак черепахи-обучателя и нажмите Готово")
+    self:button(2, yBot - 1, 16, " + Learn ", false, function()
+        self:addLog("Learning: put items into learner turtle crafting grid and press Done")
         st.mode = "learn"
     end, { bgActive = colors.green })
-    self:button(20, yBot - 1, 14, " - Удалить ", false, function()
+    self:button(20, yBot - 1, 14, " - Delete ", false, function()
         if list[st.selected] then
             recipes:remove(list[st.selected].id)
-            self:addLog("Удалён рецепт: " .. self.deps.lang.display(list[st.selected].id))
+            self:addLog("Deleted recipe: " .. self.deps.lang.display(list[st.selected].id))
         end
     end, { bg = colors.red })
     if st.mode == "learn" then
-        widgets.center(yTop, ">>> РЕЖИМ ОБУЧЕНИЯ <<<", colors.yellow, colors.black)
-        self:button(w - 16, yTop, 7, " Готово ", true, function()
+        widgets.center(yTop, ">>> LEARNING MODE <<<", colors.yellow, colors.black)
+        self:button(w - 16, yTop, 7, " Done ", true, function()
             local ok, recipe = recipes:learnFromTurtle()
             if ok then
-                self:addLog("Сохранён рецепт: " .. self.deps.lang.display(recipe.id))
+                self:addLog("Saved recipe: " .. self.deps.lang.display(recipe.id))
             else
-                self:addLog("Ошибка обучения: " .. tostring(recipe))
+                self:addLog("Learning error: " .. tostring(recipe))
             end
             st.mode = "list"
         end, { bgActive = colors.green })
@@ -414,12 +414,12 @@ function ui:renderLog(yTop, yBot, w)
         table.insert(rows, self.log[i].time .. " " .. self.log[i].msg)
     end
     if #rows == 0 then
-        widgets.center(math.floor((yTop + yBot) / 2), "Лог пуст", colors.gray)
+        widgets.center(math.floor((yTop + yBot) / 2), "Log is empty", colors.gray)
         return
     end
     widgets.list(1, yTop, w, h, rows, st.scroll, nil)
-    self:button(w - 4, yTop, 4, " Вверх ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
-    self:button(w - 4, yBot, 4, " Вниз ", false, function()
+    self:button(w - 4, yTop, 4, " Up ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
+    self:button(w - 4, yBot, 4, " Down ", false, function()
         if st.scroll + h < #rows then st.scroll = st.scroll + (h - 2) end
     end)
 end

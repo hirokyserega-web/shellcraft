@@ -64,6 +64,8 @@ end
 
 --- Загрузить кеш имён и множество отсутствующих с диска.
 function names.init()
+    local cfg = config.load()
+    names.use_russian_names = cfg and cfg.use_russian_names or false
     -- кеш
     if util.fileExists(names.CACHE_FILE) then
         local data = util.loadData(names.CACHE_FILE, {})
@@ -111,8 +113,8 @@ end
 function names.display(id, detail)
     if not id then return "?" end
     local s = tostring(id)
-    -- 1. Русское имя из автособранного словаря
-    if ru and ru.dict and ru.dict[s] then
+    -- 1. Русское имя из автособранного словаря (только если разрешено)
+    if names.use_russian_names and ru and ru.dict and ru.dict[s] then
         return ru.dict[s]
     end
     -- 2. displayName из detail (если передали) — заодно кешируем
@@ -132,5 +134,11 @@ end
 
 -- Совместимый алиас: старый код звал lang.localize(id).
 names.localize = names.display
+
+--- Пройтись по предметам хранилища и заполнить кеш.
+function names.collectNames(storageObj)
+    if not storageObj or not storageObj.collectNames then return 0 end
+    return storageObj:collectNames(names)
+end
 
 return names

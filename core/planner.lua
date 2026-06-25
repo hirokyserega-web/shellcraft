@@ -11,34 +11,46 @@ local planner = {}
 -- @param storage объект storage (опц., для проверки наличия базовых)
 -- @param depth защита от зацикливания
 -- @return node = { id, count, has_recipe, recipe, children, needed, available, missing, crafts }
-function planner.buildTree(id, count, recipes, storage, depth)
+function planner.buildTree(id, count, recipes, storage, depth, allocated)
     depth = depth or 0
+    allocated = allocated or {}
     if depth > 32 then
-        return { id = id, count = count, has_recipe = false, error = "Слишком глубокая зависимость" }
+        return { id = id, count = count, has_recipe = false, error = "Dependency too deep" }
     end
     local node = { id = id, count = count, children = {} }
     local recipe = recipes:get(id)
+
+    local available = storage and storage:count(id) or 0
+    local alreadyAllocated = allocated[id] or 0
+    local remaining = math.max(0, available - alreadyAllocated)
+    local taken = math.min(count, remaining)
+    allocated[id] = alreadyAllocated + taken
+    local deficit = count - taken
+
     if recipe then
-        node.has_recipe = true
-        node.recipe = recipe
-        node.crafts = recipes.craftsNeeded(recipe, count)
-        node.output = recipe.output or 1
-        local ings = recipes.ingredientsFor(recipe, count)
-        for _, ing in ipairs(ings) do
-            local child = planner.buildTree(ing.id, ing.count, recipes, storage, depth + 1)
-            table.insert(node.children, child)
+        if deficit == 0 then
+            node.has_recipe = false
+            node.needed = count
+            node.available = available
+            node.missing = 0
+        else
+            node.has_recipe = true
+            node.recipe = recipe
+            node.count = deficit
+            node.crafts = recipes.craftsNeeded(recipe, deficit)
+            node.output = recipe.output or 1
+            local ings = recipes.ingredientsFor(recipe, deficit)
+            for _, ing in ipairs(ings) do
+                local child = planner.buildTree(ing.id, ing.count, recipes, storage, depth + 1, allocated)
+                table.insert(node.children, child)
+            end
         end
     else
         -- Базовый ресурс: нет рецепта.
         node.has_recipe = false
         node.needed = count
-        if storage then
-            node.available = storage:count(id) or 0
-            node.missing = math.max(0, count - node.available)
-        else
-            node.available = 0
-            node.missing = count
-        end
+        node.available = available
+        node.missing = deficit
     end
     return node
 end
@@ -182,20 +194,21 @@ end
 --- Человекочитаемая длительность.
 -- @param sec секунды
 -- @param approximate пометить как приблизительную
-function planner.formatDuration(sec, approximate)
-    local s = sec or 0
+function planner.formatDuration(seconds, approx)
+    local s = math.floor(seconds or 0)
     if s < 0 then s = 0 end
-    local str
+    local prefix = approx and "~" or ""
     if s < 60 then
-        str = string.format("%d сек", math.floor(s + 0.5))
-    elseif s < 3600 then
-        str = string.format("%.1f мин", s / 60)
+        return prefix .. s .. "s"
     else
-        str = string.format("%.1f ч", s / 3600)
+        local m = math.floor(s / 60)
+        local remainingSec = s % 60
+        if remainingSec > 0 then
+            return prefix .. m .. "m " .. remainingSec .. "s"
+        else
+            return prefix .. m .. "m"
+        end
     end
-    str = "≈ " .. str
-    if approximate then str = str .. " (прибл.)" end
-    return str
 end
 
 --- Оценка общего времени крафта по дереву зависимостей.

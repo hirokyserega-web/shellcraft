@@ -56,6 +56,7 @@ function recipes:add(recipe)
     recipe.type = recipe.type or "shaped"
     if old and old.avgTime and not recipe.avgTime then
         recipe.avgTime = old.avgTime
+        recipe.samples = old.samples
         recipe.timingCount = old.timingCount
     end
     self.list[recipe.id] = recipe
@@ -184,11 +185,13 @@ recipes.list = recipes.all
 -- @return true, recipe | false, ошибка
 function recipes:learnFromTurtle()
     if not turtle then
-        return false, "обучение доступно только на черепахе"
+        return false, "learning is only available on a turtle"
     end
+    local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local slots = {}
     for i = 1, 9 do
-        local ok, det = pcall(turtle.getItemDetail, i)
+        local slot = GRID[i]
+        local ok, det = pcall(turtle.getItemDetail, slot)
         if ok and det and det.name then
             slots[i] = { id = det.name, count = det.count, displayName = det.displayName }
         end
@@ -196,7 +199,7 @@ function recipes:learnFromTurtle()
     local hasItems = false
     for _ in pairs(slots) do hasItems = true; break end
     if not hasItems then
-        return false, "слоты 1..9 пусты - положите предметы как в верстаке"
+        return false, "slots 1-9 are empty - place items like in a crafting table"
     end
     local snapshot = {}
     for i = 1, 16 do
@@ -208,7 +211,7 @@ function recipes:learnFromTurtle()
     turtle.select(1)
     local ok = turtle.craft(1)
     if not ok then
-        return false, "крафт не удался (неверная раскладка?)"
+        return false, "crafting failed (invalid layout?)"
     end
     local resultId, resultCount, resultName
     for i = 1, 16 do
@@ -225,7 +228,7 @@ function recipes:learnFromTurtle()
         end
     end
     if not resultId then
-        return false, "не удалось определить результат крафта"
+        return false, "could not determine crafting result"
     end
     local recipe = recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
     self:add(recipe)
@@ -260,7 +263,8 @@ function recipes:updateTiming(id, perOpSec)
         -- экспоненциальное скользящее среднее (alpha=0.3)
         r.avgTime = 0.3 * perOpSec + 0.7 * r.avgTime
     end
-    r.timingCount = (r.timingCount or 0) + 1
+    r.samples = (r.samples or 0) + 1
+    r.timingCount = r.samples
     self:save()
 end
 

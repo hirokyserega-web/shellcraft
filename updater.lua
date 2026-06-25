@@ -107,22 +107,22 @@ end
 -- @return true если обновлено, false если не требовалось
 function updater.update(baseUrl, force)
     baseUrl = baseUrl or config.defaults.update_url
-    util.info("Проверка обновлений с " .. baseUrl)
+    util.info("Checking updates from " .. baseUrl)
 
     local local_ = updater.localVersion()
     local remote = updater.remoteVersion(baseUrl)
     if not remote then
-        util.warn("Не удалось получить удалённую версию")
+        util.warn("Could not get remote version")
         return false, "no remote version"
     end
-    util.info(string.format("Локально: %s | Удалённо: %s", local_, remote))
+    util.info(string.format("Local: %s | Remote: %s", local_, remote))
 
     if not force and not updater.isNewer(local_, remote) then
-        util.ok("Обновление не требуется")
+        util.ok("Update not required")
         return false, "up-to-date"
     end
 
-    util.info("Скачиваю обновление...")
+    util.info("Downloading update...")
     local okCount, failCount = 0, 0
     for _, relPath in ipairs(updater.FILES) do
         local ok, err = updater.downloadFile(baseUrl, relPath)
@@ -137,7 +137,7 @@ function updater.update(baseUrl, force)
     -- Обновляем локальный version
     util.writeFile("version", remote)
 
-    util.ok(string.format("Обновлено файлов: %d, ошибок: %d", okCount, failCount))
+    util.ok(string.format("Files updated: %d, errors: %d", okCount, failCount))
     if failCount == 0 then
         return true
     end
@@ -151,7 +151,7 @@ function updater.run(baseUrl, rebootAfter)
     rebootAfter = (rebootAfter ~= false) -- по умолчанию true
     local updated, err = updater.update(baseUrl, false)
     if updated then
-        util.ok("Обновление установлено. Перезагрузка...")
+        util.ok("Update installed. Rebooting...")
         if rebootAfter then
             os.sleep(1)
             os.reboot()

@@ -51,13 +51,14 @@ function worker:sendResult(taskId, success, payload)
     net.send(self.core_id, net.MSG.RESULT, payload)
 end
 
---- Очистить инвентарь черепахи (вернуть всё в... никуда, просто перенести в слоты 10-16).
--- Слоты 1-9 должны быть чистыми для раскладки pattern.
+local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
+
+--- Очистить инвентарь черепахи (вернуть всё из слотов сетки в слоты 13-16).
 local function clearCraftingGrid()
-    for s = 1, 9 do
+    for _, s in ipairs(GRID) do
         if turtle.getItemCount(s) > 0 then
-            -- ищем свободный слот 10-16
-            for dst = 10, 16 do
+            -- ищем свободный слот 13-16
+            for dst = 13, 16 do
                 if turtle.getItemSpace(dst) > 0 then
                     turtle.select(s)
                     local detail = turtle.getItemDetail(s)
@@ -74,10 +75,10 @@ local function clearCraftingGrid()
     turtle.select(1)
 end
 
---- Найти слот 10-16 с предметом данного id и нужным количеством.
+--- Найти слот 13-16 с предметом данного id и нужным количеством.
 -- @return слот или nil
 local function findSlotWith(id, fromSlot)
-    fromSlot = fromSlot or 10
+    fromSlot = fromSlot or 13
     for s = fromSlot, 16 do
         local detail = turtle.getItemDetail(s)
         if detail and detail.name == id then
@@ -92,7 +93,7 @@ end
 -- @param crafts сколько крафтов
 -- @return true | false, ошибка
 local function layoutShaped(recipe, crafts)
-    -- Сначала убираем всё из слотов 1-9 в 10-16
+    -- Сначала убираем всё из слотов сетки в 13-16
     clearCraftingGrid()
     for i = 1, 9 do
         local row = math.ceil(i / 3)
@@ -100,16 +101,17 @@ local function layoutShaped(recipe, crafts)
         local targetId = recipe.pattern[row] and recipe.pattern[row][col]
         if targetId then
             local need = crafts
-            local searchFrom = 10
+            local searchFrom = 13
             while need > 0 do
                 local s = findSlotWith(targetId, searchFrom)
                 if not s then
-                    return false, "не найден ингредиент " .. lang.localize(targetId) .. " в инвентаре черепахи"
+                    return false, "ingredient not found in turtle inventory: " .. lang.localize(targetId)
                 end
                 local detail = turtle.getItemDetail(s)
                 local take = math.min(need, detail.count)
                 turtle.select(s)
-                turtle.transferTo(i, take)
+                local gridSlot = GRID[i]
+                turtle.transferTo(gridSlot, take)
                 need = need - take
                 searchFrom = s + 1
             end
@@ -119,33 +121,34 @@ local function layoutShaped(recipe, crafts)
     return true
 end
 
---- Разложить ингредиенты для shapeless рецепта (любые слоты 1-9).
+--- Разложить ингредиенты для shapeless рецепта (любые слоты сетки).
 -- Каждый ингредиент — в свой слот, количество = crafts * ing.count.
 local function layoutShapeless(recipe, crafts)
     clearCraftingGrid()
-    local slot = 1
+    local idx = 1
     for _, ing in ipairs(recipe.ingredients or {}) do
-        if slot > 9 then
-            return false, "слишком много ингредиентов для shapeless (>9)"
+        if idx > 9 then
+            return false, "too many ingredients for shapeless (>9)"
         end
         local need = crafts * (ing.count or 1)
         if need > 64 then
-            return false, "слишком много " .. lang.localize(ing.id) .. " (" .. need .. ">64) — уменьшите количество"
+            return false, "too many " .. lang.localize(ing.id) .. " (" .. need .. ">64)"
         end
-        local searchFrom = 10
+        local searchFrom = 13
         while need > 0 do
             local s = findSlotWith(ing.id, searchFrom)
             if not s then
-                return false, "не найден ингредиент " .. lang.localize(ing.id) .. " в инвентаре черепахи"
+                return false, "ingredient not found in turtle inventory: " .. lang.localize(ing.id)
             end
             local detail = turtle.getItemDetail(s)
             local take = math.min(need, detail.count)
             turtle.select(s)
-            turtle.transferTo(slot, take)
+            local gridSlot = GRID[idx]
+            turtle.transferTo(gridSlot, take)
             need = need - take
             searchFrom = s + 1
         end
-        slot = slot + 1
+        idx = idx + 1
     end
     turtle.select(1)
     return true
@@ -161,45 +164,54 @@ end
 -- @return true, howMany | false, ошибка
 function worker:craft(recipe, count)
     if not recipe then
-        return false, "нет рецепта"
+        return false, "No recipe"
     end
     if recipe.type == "machine" then
-        return false, "машинные рецепты обрабатывает Core, не воркер"
+        return false, "Machine recipes are handled by Core, not worker"
     end
     local output = recipe.output or 1
     local crafts = math.ceil(count / output)
     self.crafting = true
 
-    local t0 = os.clock()
+    local t0 = os.epoch("utc")
+    local totalCrafted = 0
+    local remainingCrafts = crafts
 
-    -- Раскладываем
-    local ok, err
-    if recipe.type == "shaped" then
-        ok, err = layoutShaped(recipe, crafts)
-    else
-        ok, err = layoutShapeless(recipe, crafts)
-    end
-    if not ok then
-        self.crafting = false
-        return false, err
+    while remainingCrafts > 0 do
+        local chunk = math.min(64, remainingCrafts)
+        -- Layout
+        local ok, err
+        if recipe.type == "shaped" then
+            ok, err = layoutShaped(recipe, chunk)
+        else
+            ok, err = layoutShapeless(recipe, chunk)
+        end
+        if not ok then
+            self.crafting = false
+            return false, err
+        end
+
+        -- Craft
+        turtle.select(1)
+        local success = turtle.craft(chunk)
+        if not success then
+            self.crafting = false
+            return false, "turtle.craft failed for chunk " .. chunk
+        end
+        totalCrafted = totalCrafted + chunk * output
+        remainingCrafts = remainingCrafts - chunk
     end
 
-    -- Крафтим (turtle.craft возвращает boolean, не число)
-    turtle.select(1)
-    local success = turtle.craft(crafts)
-    local t1 = os.clock()
+    local t1 = os.epoch("utc")
     self.crafting = false
-    if not success then
-        return false, "turtle.craft вернул 0 — неверная раскладка или не хватает"
-    end
-    local elapsed = t1 - t0
+    local elapsed = (t1 - t0) / 1000
     if elapsed < 0 then elapsed = 0 end
-    return true, crafts * output, elapsed, crafts
+    return true, totalCrafted, elapsed, crafts
 end
 
 --- Главный цикл воркера.
 function worker:run()
-    util.ok("Воркер #" .. os.getComputerID() .. " запущен, жду задачи")
+    util.ok("Worker #" .. os.getComputerID() .. " started, waiting for tasks")
     -- Первичный HELLO (broadcast) — Core подхватит
     self:sayHello(nil)
     -- Периодический heartbeat
@@ -213,11 +225,11 @@ function worker:run()
             elseif msg.type == net.MSG.CRAFT_REQUEST then
                 local p = msg.payload or {}
                 self.core_id = senderId
-                util.info("Задача крафта: " .. tostring(p.recipe and p.recipe.id) .. " x" .. tostring(p.count))
-                self:sendStatus(p.task_id, 0, "начинаю")
+                util.info("Craft task: " .. tostring(p.recipe and p.recipe.id) .. " x" .. tostring(p.count))
+                self:sendStatus(p.task_id, 0, "starting")
                 local ok, res, elapsed, crafts = self:craft(p.recipe, p.count)
                 if ok then
-                    self:sendStatus(p.task_id, 100, "готово")
+                    self:sendStatus(p.task_id, 100, "done")
                     self:sendResult(p.task_id, true, {
                         task_id = p.task_id,
                         success = true,
@@ -225,20 +237,20 @@ function worker:run()
                         elapsed = elapsed,
                         crafts = crafts,
                     })
-                    util.ok("Готово: " .. res .. " шт за " .. string.format("%.2f", elapsed or 0) .. "с")
+                    util.ok("Done: " .. res .. " pcs in " .. string.format("%.2f", elapsed or 0) .. "s")
                 else
                     self:sendResult(p.task_id, false, {
                         task_id = p.task_id,
                         success = false,
                         error = res,
                     })
-                    util.err("Ошибка крафта: " .. tostring(res))
+                    util.err("Craft error: " .. tostring(res))
                 end
             elseif msg.type == net.MSG.PING then
                 net.send(senderId, net.MSG.PONG, { id = os.getComputerID() })
             elseif msg.type == net.MSG.CRAFT_CANCEL then
                 -- Отмена — не реализована полноценно, просто лог
-                util.warn("Получен cancel для задачи " .. tostring(msg.payload and msg.payload.task_id))
+                util.warn("Received cancel for task " .. tostring(msg.payload and msg.payload.task_id))
             end
         end
         -- Heartbeat Core раз в 10 сек

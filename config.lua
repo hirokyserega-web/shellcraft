@@ -15,6 +15,7 @@ config.defaults = {
     update_interval = 300,     -- проверка обновлений раз в N секунд
     net_timeout = 5,
     heartbeat_interval = 10,
+    use_russian_names = false, -- Requires a Cyrillic font resource pack or transliteration
     -- Ручное переопределение периферии (пусто = автоопределение)
     peripherals = {
         storage   = {},        -- список имён chest/barrel
@@ -60,7 +61,19 @@ local function isMachine(name)
     if type(p.list) ~= "function" or type(p.size) ~= "function" then return false end
     local ptype = peripheral.getType(name)
     -- Известные типы машин
-    local known = { furnace = true, blast_furnace = true, smoker = true, brewer = true, ["create:millstone"] = true }
+    local known = {
+        ["minecraft:furnace"] = true,
+        ["minecraft:blast_furnace"] = true,
+        ["minecraft:smoker"] = true,
+        ["minecraft:brewer"] = true,
+        ["create:millstone"] = true,
+        ["create:crushing_wheels"] = true,
+        -- Для обратной совместимости
+        furnace = true,
+        blast_furnace = true,
+        smoker = true,
+        brewer = true,
+    }
     if known[ptype] then return true end
     -- Эвристика: печь имеет getBurnTime или getSize возвращает 3
     if type(p.getBurnTime) == "function" then return true end

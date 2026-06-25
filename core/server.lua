@@ -6,28 +6,28 @@ local server = {}
 
 --- Запустить сервер.
 function server.run()
-    util.ok("=== ShellCraft Core запускается ===")
+    util.ok("=== ShellCraft Core starting ===")
 
     -- 1. Конфиг + периферия
     local cfg = config.load()
     cfg.peripherals = config.resolve(cfg)
-    util.info(string.format("Периферия: сундуков=%d, мониторов=%d, модемов=%d, машин=%d",
+    util.info(string.format("Peripherals: chests=%d, monitors=%d, modems=%d, machines=%d",
         #cfg.peripherals.storage, #cfg.peripherals.monitors,
         #cfg.peripherals.modems, #cfg.peripherals.machines))
 
     -- 2. Rednet
     if not net.open() then
-        util.err("Нет модема! Поставьте проводной или беспроводной модем.")
+        util.err("No modem! Please attach a wired or wireless modem.")
         return
     end
 
     -- 3. Подсистемы
     local st = storage.new(cfg.peripherals)
     st:scan()
-    util.info("Хранилище отсканировано: " .. #st:items() .. " типов предметов")
+    util.info("Storage scanned: " .. #st:items() .. " item types")
 
     local rec = recipes.new(cfg.recipes_file)
-    util.info("Загружено рецептов: " .. #(rec:all()))
+    util.info("Loaded recipes: " .. #(rec:all()))
 
     local mach = machines.new(cfg.peripherals, st)
 
@@ -68,21 +68,21 @@ function server.run()
         storage = st, recipes = rec, dispatcher = disp,
         machines = mach, lang = names,
     })
-    uiInstance:addLog("ShellCraft Core запущен")
+    uiInstance:addLog("ShellCraft Core started")
 
     -- 5b. Собираем кеш отображаемых имён из хранилища (один раз)
     st:collectNames(names)
     names.saveCache()
-    util.info("Кеш имён: " .. #util.keys(names.cache) .. " предметов")
+    util.info("Name cache: " .. #util.keys(names.cache) .. " items")
 
     -- 6. Поиск воркеров при старте
     local found = net.discoverWorkers(3)
     for wid, info in pairs(found) do
         disp:addWorker(wid, info)
-        uiInstance:addLog("Найден воркер #" .. wid)
+        uiInstance:addLog("Found worker #" .. wid)
     end
     if next(found) == nil then
-        uiInstance:addLog("Воркеры не найдены - включите черепах-воркеров")
+        uiInstance:addLog("Workers not found - please enable turtle workers")
     end
 
     -- 7. Корутины
@@ -122,7 +122,7 @@ function server.run()
             for wid, info in pairs(found2) do
                 if not disp.workers[wid] then
                     disp:addWorker(wid, info)
-                    uiInstance:addLog("Подключился воркер #" .. wid)
+                    uiInstance:addLog("Worker #" .. wid .. " connected")
                 end
             end
         end
@@ -147,14 +147,14 @@ function server.run()
             elseif ev == "timer" and p1 == timer then
                 timer = os.startTimer(0.5)
             elseif ev == "shellcraft_quit" then
-                util.info("Завершение по запросу пользователя")
+                util.info("Exiting on user request")
                 break
             end
         end
     end
 
     -- Запускаем всё параллельно
-    util.ok("Запуск корутин сервера...")
+    util.ok("Starting server coroutines...")
     parallel.waitForAny(
         netListener,
         schedulerLoop,
@@ -162,7 +162,7 @@ function server.run()
         discoveryLoop,
         uiLoop
     )
-    util.warn("Сервер остановлен")
+    util.warn("Server stopped")
 end
 
 return server

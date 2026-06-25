@@ -8,6 +8,10 @@ machines.__index = machines
 --- Раскладка слотов по типу машины.
 -- {input=..., fuel=..., output=...}
 machines.SLOTS = {
+    ["minecraft:furnace"]       = { input = {1}, fuel = {2}, output = {3} },
+    ["minecraft:blast_furnace"] = { input = {1}, fuel = {2}, output = {3} },
+    ["minecraft:smoker"]        = { input = {1}, fuel = {2}, output = {3} },
+    ["minecraft:brewer"]        = { input = {1, 2, 3}, fuel = {4}, output = {5} },
     furnace       = { input = {1}, fuel = {2}, output = {3} },
     blast_furnace = { input = {1}, fuel = {2}, output = {3} },
     smoker        = { input = {1}, fuel = {2}, output = {3} },
@@ -48,6 +52,11 @@ function machines:_slots(name)
     local ptype = peripheral.getType(name)
     if machines.SLOTS[ptype] then
         return machines.SLOTS[ptype], ptype
+    end
+    -- Check base type if namespaced type not found in SLOTS
+    local _, base = ptype:match("^([^:]+):(.+)$")
+    if base and machines.SLOTS[base] then
+        return machines.SLOTS[base], ptype
     end
     -- Эвристика: size() == 3 -> печь, иначе input=первый, output=последний
     local p = wrap(name)
@@ -128,10 +137,20 @@ machines.status = machines.info
 -- @param machineType тип (например "furnace")
 -- @return имя машины или nil
 function machines:findFree(machineType)
+    local function matchType(ptype, mtype)
+        if not ptype or not mtype then return false end
+        if ptype == mtype then return true end
+        local p_ns, p_base = ptype:match("^([^:]+):(.+)$")
+        local m_ns, m_base = mtype:match("^([^:]+):(.+)$")
+        p_base = p_base or ptype
+        m_base = m_base or mtype
+        if p_ns and m_ns and p_ns ~= m_ns then return false end
+        return p_base == m_base
+    end
+
     for _, name in ipairs(self.names) do
         local ptype = peripheral.getType(name)
-        -- Сравнение по типу; "minecraft:furnace" не используем, peripheral.getType даёт "furnace"
-        local match = (machineType == nil) or (ptype == machineType) or
+        local match = (machineType == nil) or matchType(ptype, machineType) or
                       (ptype and machineType and ptype:find(machineType, 1, true) ~= nil)
         if match then
             local inf = self:info(name)
@@ -149,12 +168,12 @@ end
 -- @return true если всё положили
 function machines:_feed(name, ingredients)
     local slots = self:_slots(name)
-    if not slots then return false, "неизвестная раскладка слотов" end
+    if not slots then return false, "unknown slot layout" end
     for i, ing in ipairs(ingredients) do
         local targetSlot = slots.input[i] or slots.input[1]
         local moved = self.storage:extract(ing.id, ing.count, name, targetSlot)
         if moved < ing.count then
-            return false, "не хватило " .. (ing.count - moved) .. " " .. lang.localize(ing.id)
+            return false, "missing " .. (ing.count - moved) .. " " .. lang.localize(ing.id)
         end
     end
     return true
@@ -180,7 +199,7 @@ function machines:_waitResult(name, timeout)
         if hasResult then return true end
         os.sleep(0.5)
     end
-    return false, "таймаут ожидания результата"
+    return false, "timeout waiting for result"
 end
 
 --- Забрать результат из машины в хранилище.
@@ -202,7 +221,7 @@ end
 -- @return true, перемещено | false, ошибка
 function machines:process(recipe, count)
     if not recipe or recipe.type ~= "machine" then
-        return false, "рецепт не для машины"
+        return false, "recipe not for machine"
     end
     -- Сколько циклов машины нужно
     local output = recipe.output or 1
@@ -216,10 +235,10 @@ function machines:process(recipe, count)
     -- Ищем свободную машину
     local machineName = self:findFree(recipe.machine)
     if not machineName then
-        return false, "нет свободной машины типа " .. tostring(recipe.machine)
+        return false, "no free machine of type " .. tostring(recipe.machine)
     end
     emit(self, "machine_start", { name = machineName, recipe = recipe.id, count = need })
-    local t0 = os.clock()
+    local t0 = os.epoch("utc")
     -- Кладём вход
     local ok, err = self:_feed(machineName, input)
     if not ok then
@@ -234,8 +253,8 @@ function machines:process(recipe, count)
     end
     -- Забираем результат
     local moved = self:_collect(machineName)
-    local t1 = os.clock()
-    local elapsed = t1 - t0
+    local t1 = os.epoch("utc")
+    local elapsed = (t1 - t0) / 1000
     if elapsed < 0 then elapsed = 0 end
     emit(self, "machine_done", { name = machineName, recipe = recipe.id, count = moved })
     return true, moved, elapsed, cycles

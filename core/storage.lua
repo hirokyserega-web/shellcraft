@@ -122,21 +122,56 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
     local toMove = count or detail.count or 0
     local id = detail.name
     local moved = 0
-    -- Сначала пытаемся сложить в существующие стеки того же id
-    for _, name in ipairs(self.names) do
-        if toMove <= 0 then break end
-        local p = wrap(name)
-        if p and p.pullItems then
-            local ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove)
-            if ok2 and n then
-                moved = moved + n
-                toMove = toMove - n
+
+    -- 1. Try to deposit into existing slots of the same item ID
+    if self.cache[id] and self.cache[id].locations then
+        for _, loc in ipairs(self.cache[id].locations) do
+            if toMove <= 0 then break end
+            local p = wrap(loc.p)
+            if p and p.pullItems then
+                -- Try to pull into the existing slot to stack
+                local ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
+                if ok2 and n and n > 0 then
+                    moved = moved + n
+                    toMove = toMove - n
+                    loc.qty = loc.qty + n
+                end
             end
         end
     end
-    -- Обновляем кэш
+
+    -- 2. If there are still items left to move, find empty slots
+    if toMove > 0 then
+        for _, name in ipairs(self.names) do
+            if toMove <= 0 then break end
+            local p = wrap(name)
+            if p and p.size and p.list then
+                local sz = p.size()
+                local list = p.list()
+                for s = 1, sz do
+                    if toMove <= 0 then break end
+                    if not list[s] then
+                        -- This slot is empty
+                        local ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, s)
+                        if ok2 and n and n > 0 then
+                            moved = moved + n
+                            toMove = toMove - n
+                            if not self.cache[id] then
+                                self.cache[id] = { total = 0, locations = {} }
+                            end
+                            table.insert(self.cache[id].locations, { p = name, s = s, qty = n })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Update the total cache count
     if moved > 0 then
-        if not self.cache[id] then self.cache[id] = { total = 0, locations = {} } end
+        if not self.cache[id] then
+            self.cache[id] = { total = 0, locations = {} }
+        end
         self.cache[id].total = (self.cache[id].total or 0) + moved
     end
     return moved
@@ -182,9 +217,8 @@ function storage:collectNames(namesModule)
             if ok and items then
                 for slot, info in pairs(items) do
                     local id = info.name
-                    -- берём displayName только если ещё не в кеше и не в словаре
-                    if id and not namesModule.cache[id]
-                       and not (ru and ru.dict and ru.dict[id]) then
+                    -- берём displayName только если ещё не в кеше
+                    if id and not namesModule.cache[id] then
                         local ok2, det = pcall(p.getItemDetail, slot)
                         if ok2 and det and det.displayName then
                             namesModule.cacheName(id, det.displayName)

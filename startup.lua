@@ -32,7 +32,7 @@ names.init()
 
 local function main()
     util.info("=== ShellCraft " .. _SHELLCRAFT_VERSION .. " ===")
-    util.info("Компьютер #" .. os.getComputerID())
+    util.info("Computer #" .. os.getComputerID())
 
     -- Конфиг
     local cfg = config.load()
@@ -40,26 +40,26 @@ local function main()
         cfg.role = "core"
         config.save(cfg)
     end
-    util.info("Роль: " .. cfg.role)
+    util.info("Role: " .. cfg.role)
 
     -- Автообновление (перезагрузит компьютер если есть новая версия)
     local baseUrl = cfg.update_url or config.defaults.update_url
     if baseUrl then
         local ok = pcall(updater.run, baseUrl, true)
         if not ok then
-            util.warn("Автообновление пропущено (нет сети?)")
+            util.warn("Auto-update skipped (no network?)")
         end
     end
 
     -- Запуск роли
     if cfg.role == "worker" then
         local worker = require("worker.worker")
-        util.ok("Запуск воркера...")
+        util.ok("Starting worker...")
         local w = worker.new()
         if cfg.core_id then w:setCore(cfg.core_id) end
         w:run()
     else
-        util.ok("Запуск Core-сервера...")
+        util.ok("Starting Core server...")
         server = require("core.server")
         server.run()
     end

@@ -175,21 +175,69 @@ function dispatcher:collectResult(workerId)
     return total
 end
 
+function dispatcher:isTaskReady(task)
+    if not task.dependencies or #task.dependencies == 0 then
+        return true
+    end
+    for _, depId in ipairs(task.dependencies) do
+        local depTask = self.tasks[depId]
+        if not depTask or depTask.status ~= "done" then
+            return false
+        end
+    end
+    return true
+end
+
+function dispatcher:failDependents(failedTaskId, reason)
+    for _, task in pairs(self.tasks) do
+        if task.status == "queued" and task.dependencies then
+            for _, depId in ipairs(task.dependencies) do
+                if depId == failedTaskId then
+                    task.status = "failed"
+                    task.result = "Dependency task " .. failedTaskId .. " failed: " .. tostring(reason)
+                    -- Remove from queue
+                    for i, qid in ipairs(self.queue) do
+                        if qid == task.id then
+                            table.remove(self.queue, i)
+                            break
+                        end
+                    end
+                    emit(self, "task_failed", { id = task.id, error = task.result })
+                    self:failDependents(task.id, reason)
+                    break
+                end
+            end
+        end
+    end
+end
+
 --- Один тик планировщика.
 function dispatcher:tick()
     if #self.queue == 0 then return end
     local workerId = self:findFree()
     if not workerId then return end
-    local taskId = table.remove(self.queue, 1)
-    local task = self.tasks[taskId]
+
+    local readyIdx = nil
+    local task = nil
+    for i, tid in ipairs(self.queue) do
+        local t = self.tasks[tid]
+        if t and t.status == "queued" and self:isTaskReady(t) then
+            readyIdx = i
+            task = t
+            break
+        end
+    end
     if not task then return end
+
+    table.remove(self.queue, readyIdx)
 
     -- Машинные рецепты обрабатывает сам Core через machines
     if task.recipe.type == "machine" then
         if not self.machines then
             task.status = "failed"
-            task.result = "модуль машин не подключён"
+            task.result = "machine module not connected"
             emit(self, "task_failed", { id = task.id, error = task.result })
+            self:failDependents(task.id, task.result)
             return
         end
         task.status = "running"
@@ -208,6 +256,7 @@ function dispatcher:tick()
             task.status = "failed"
             task.result = { success = false, error = res }
             emit(self, "task_failed", { id = task.id, error = tostring(res) })
+            self:failDependents(task.id, tostring(res))
         end
         return
     end
@@ -220,8 +269,9 @@ function dispatcher:tick()
             task.status = "failed"
             task.result = err
             emit(self, "task_failed", { id = task.id, error = err })
+            self:failDependents(task.id, err)
         else
-            table.insert(self.queue, taskId)
+            table.insert(self.queue, task.id)
             emit(self, "task_retry", { id = task.id, error = err })
         end
         return
@@ -273,7 +323,9 @@ function dispatcher:handleMessage(senderId, msg)
                 self:collectResult(senderId)
                 task.status = "failed"
                 task.result = p
-                emit(self, "task_failed", { id = task.id, error = p.error or "воркер вернул ошибку" })
+                local err = p.error or "worker returned error"
+                emit(self, "task_failed", { id = task.id, error = err })
+                self:failDependents(task.id, err)
             end
             w.state = "free"
             w.current_task = nil
@@ -291,7 +343,7 @@ function dispatcher:checkTimeouts(timeout)
     local now = os.clock()
     for id, w in pairs(self.workers) do
         if w.state == "busy" and (now - (w.last_seen or now)) > timeout then
-            util.warn("Воркер " .. id .. " завис, возвращаю задачу в очередь")
+            util.warn("Worker " .. id .. " timed out, returning task to queue")
             if w.current_task then self:requeue(w.current_task) end
             w.state = "free"
             w.current_task = nil
@@ -325,7 +377,7 @@ end
 -- @return task_ids список, либо nil + сообщение об ошибке
 function dispatcher:requestCraft(id, count, recipes)
     if not recipes:has(id) then
-        return nil, "Нет рецепта для " .. lang.localize(id)
+        return nil, "No recipe for " .. lang.localize(id)
     end
     local tree = planner.buildTree(id, count, recipes, self.storage)
     local can, avail = planner.canCraft(tree, self.storage)
@@ -333,19 +385,54 @@ function dispatcher:requestCraft(id, count, recipes)
         local missing = {}
         for mid, info in pairs(avail) do
             if info.missing > 0 then
-                table.insert(missing, lang.localize(mid) .. " (надо " .. info.needed .. ", есть " .. info.available .. ", не хватает " .. info.missing .. ")")
+                table.insert(missing, lang.localize(mid) .. " (need " .. info.needed .. ", have " .. info.available .. ", missing " .. info.missing .. ")")
             end
         end
-        return nil, "Не хватает ресурсов: " .. table.concat(missing, "; ")
+        return nil, "Missing resources: " .. table.concat(missing, "; ")
     end
-    local steps = planner.craftSteps(tree)
+
     local taskIds = {}
-    for _, step in ipairs(steps) do
-        local tid = self:queueTask(step.recipe, step.count, { step_id = step.id, total_steps = #steps })
+    local nodeToTaskId = {}
+
+    local function createTasks(node)
+        if not node or not node.has_recipe then return nil end
+        if nodeToTaskId[node] then return nodeToTaskId[node] end
+
+        local deps = {}
+        for _, child in ipairs(node.children) do
+            local depId = createTasks(child)
+            if depId then
+                table.insert(deps, depId)
+            end
+        end
+
+        local tid = newTaskId()
+        local task = {
+            id = tid,
+            recipe = node.recipe,
+            count = node.count,
+            status = "queued",
+            attempts = 0,
+            progress = 0,
+            result = nil,
+            dependencies = deps,
+        }
+        self.tasks[tid] = task
+        nodeToTaskId[node] = tid
         table.insert(taskIds, tid)
+        table.insert(self.queue, tid)
+        emit(self, "task_queued", { id = tid, recipe = node.recipe.id, count = node.count })
+        return tid
     end
-    emit(self, "craft_planned", { id = id, count = count, steps = #steps })
-    return taskIds, "Запланировано шагов: " .. #steps
+
+    createTasks(tree)
+
+    if #taskIds == 0 then
+        return {}, "Already in storage"
+    end
+
+    emit(self, "craft_planned", { id = id, count = count, steps = #taskIds })
+    return taskIds, "Planned steps: " .. #taskIds
 end
 
 return dispatcher

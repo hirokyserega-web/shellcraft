@@ -64,12 +64,12 @@ local function ask(prompt, default)
     return line
 end
 
-print("=== Установка ShellCraft ===")
-print("Источник: " .. BASE)
+print("=== ShellCraft Installation ===")
+print("Source: " .. BASE)
 print()
 
 -- Скачивание файлов
-print("Скачиваю файлы проекта...")
+print("Downloading project files...")
 local okCount, failCount = 0, 0
 for _, relPath in ipairs(FILES) do
     if PROTECTED[relPath] then
@@ -82,30 +82,30 @@ for _, relPath in ipairs(FILES) do
                 print("  [OK] " .. relPath)
             else
                 failCount = failCount + 1
-                print("  [FAIL запись] " .. relPath)
+                print("  [FAIL write] " .. relPath)
             end
         else
             failCount = failCount + 1
-            print("  [FAIL сеть] " .. relPath)
+            print("  [FAIL network] " .. relPath)
         end
     end
 end
 
 if failCount > 0 then
     print()
-    print("Внимание: " .. failCount .. " файл(ов) не скачались.")
-    print("Проверь подключение к интернету и что репозиторий публичный.")
+    print("Warning: " .. failCount .. " file(s) failed to download.")
+    print("Check internet connection and that the repository is public.")
 end
 
 print()
-print("Скачано файлов: " .. okCount)
+print("Downloaded files: " .. okCount)
 
 -- Настройка роли
 print()
-print("Выбери роль этого компьютера:")
-print("  1) core   — главный сервер системы (с монитором и хранилищем)")
-print("  2) worker — черепаха-крафтер")
-local roleChoice = ask("Роль [1/2]", "1")
+print("Select role for this computer:")
+print("  1) core   - main system server (with monitor and storage)")
+print("  2) worker - turtle crafter")
+local roleChoice = ask("Role [1/2]", "1")
 local role = "core"
 if roleChoice == "2" or roleChoice:lower() == "worker" then
     role = "worker"
@@ -113,7 +113,7 @@ end
 
 local coreId = nil
 if role == "worker" then
-    coreId = tonumber(ask("ID компьютера Core (число, см. label/core)"))
+    coreId = tonumber(ask("Core computer ID (number, see label/core)"))
 end
 
 -- Создаём config.dat если его нет
@@ -137,23 +137,24 @@ f.close()
 -- В CC:Tweaked файл startup.lua в корне запускается автоматически.
 
 print()
-print("=== Готово! ===")
-print("Роль: " .. role)
+print("=== Done! ===")
+print("Role: " .. role)
 if coreId then print("Core ID: " .. coreId) end
 print()
 if role == "core" then
-    print("Подключи к компьютеру:")
-    print("  - проводной модем (для rednet с воркерами)")
-    print("  - монитор (для UI)")
-    print("  - сундуки/бочки (хранилище)")
-    print("  - при необходимости печь/механизмы")
+    print("Connect to computer:")
+    print("  - wired modem (for rednet with workers)")
+    print("  - monitor (for UI)")
+    print("  - chests/barrels (storage)")
+    print("  - furnace/machines if needed")
     print()
-    print("Для добавления крафтеров поставь черепаху,")
-    print("повтори эту установку с ролью worker и укажи ID этого Core.")
+    print("To add crafters place a turtle,")
+    print("repeat this installation with role 'worker' and specify this Core ID.")
 else
-    print("Убедись, что у черепахи есть проводной/беспроводной модем")
-    print("и она в одной rednet-сети с Core.")
+    print("Make sure the turtle has a wired/wireless modem")
+    print("and is in the same rednet network as Core.")
 end
 print()
-print("Перезагрузи компьютер/черепаху — ShellCraft запустится автоматически.")
-print("(Команда: reboot)")
+print("Reboot computer/turtle - ShellCraft will start automatically.")
+print("(Command: reboot)")
+

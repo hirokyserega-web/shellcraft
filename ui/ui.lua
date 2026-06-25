@@ -171,8 +171,8 @@ function ui:render()
 
     -- Подвал: прогресс активного крафта ИЛИ подсказка
     term.setBackgroundColor(colors.black)
-    term.clearLine()  -- на строке h
     term.setCursorPos(1, h)
+    term.clearLine()
     local a = self.state.craft.active
     if a and (a.done + a.failed) < a.total then
         local completed = a.done + a.failed
@@ -696,7 +696,8 @@ function ui:renderRecipes(yTop, yBot, w)
         local listH = h - 1
         if #rows == 0 then
             widgets.clearArea(1, yTop, wLeft, listH)
-            widgets.center(math.floor((yTop + yBot - 1) / 2), "No recipes", colors.gray)
+            local centerY = math.floor((yTop + yBot - 1) / 2)
+            widgets.text(1 + math.floor((wLeft - #("No recipes")) / 2), centerY, "No recipes", colors.gray)
         else
             widgets.list(1, yTop, wLeft, listH, rows, st.scroll, st.selected)
         end
@@ -900,7 +901,8 @@ function ui:renderRecipes(yTop, yBot, w)
                 end)
             else
                 widgets.clearArea(startX, yTop, wRight, h)
-                widgets.center(math.floor((yTop + yBot) / 2) + wLeft + 1, "Select recipe", colors.gray)
+                local centerY = math.floor((yTop + yBot) / 2)
+                widgets.text(startX + math.floor((wRight - #("Select recipe")) / 2), centerY, "Select recipe", colors.gray)
                 self:button(startX, yBot, 10, " + Record ", false, function()
                     self:startWizard()
                 end, { bgActive = colors.green })

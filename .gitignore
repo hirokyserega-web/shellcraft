@@ -1,0 +1,20 @@
+# Локальные данные (переживают обновления, но не в git)
+config.local.lua
+recipes.dat
+recipes.local.lua
+storage.cache
+*.log
+*.bak
+*.tmp
+
+# Логи отсутствующих переводов
+lang/missing.txt
+
+# CraftOS-PC / IDE
+*.meta
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

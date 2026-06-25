@@ -1,0 +1,336 @@
+-- core/dispatcher.lua
+-- Раздача задач крафта воркерам-черепахам через rednet.
+-- Очередь задач, учёт занятых/свободных воркеров, повтор при падении.
+--
+-- Перемещение предметов: Core pushItems'ает ингредиенты ПРЯМО в инвентарь черепахи
+-- (по проводному модему, имя = "turtle_<id>"), а после крафта pullItems'ает результат
+-- обратно. Воркеру не нужны буферные сундуки — только wired+wireless модемы.
+
+local dispatcher = {}
+dispatcher.__index = dispatcher
+
+local taskSeq = 0
+local function newTaskId()
+    taskSeq = taskSeq + 1
+    return "task_" .. os.getComputerID() .. "_" .. taskSeq .. "_" .. math.floor(os.clock() * 1000)
+end
+
+--- Создать диспетчер.
+-- @param storage объект storage
+-- @param machines объект machines (опц., для машинных рецептов)
+function dispatcher.new(storage, machines)
+    local self = setmetatable({}, dispatcher)
+    self.storage = storage
+    self.machines = machines
+    self.workers = {}     -- [id] = { info, state, current_task, last_seen, turtle_name }
+    self.tasks = {}       -- [task_id] = task
+    self.queue = {}       -- массив task_id
+    self.maxAttempts = 3
+    self.onEvent = nil
+    return self
+end
+
+function dispatcher:setEventHandler(fn)
+    self.onEvent = fn
+end
+
+local function emit(self, etype, payload)
+    if self.onEvent then self.onEvent(etype, payload) end
+end
+
+--- Найти сетевое имя черепахи по её id.
+-- Перебирает peripheral.getNames(), ищет turtle/computer с matching getID().
+function dispatcher:findTurtleName(workerId)
+    for _, name in ipairs(peripheral.getNames()) do
+        local ptype = peripheral.getType(name)
+        if ptype == "turtle" or ptype == "computer" then
+            local ok, id = pcall(peripheral.call, name, "getID")
+            if ok and id == workerId then
+                return name
+            end
+        end
+    end
+    return nil
+end
+
+--- Сетевое имя воркера (с кэшем).
+function dispatcher:workerName(workerId)
+    local w = self.workers[workerId]
+    if not w then return nil end
+    if w.turtle_name then return w.turtle_name end
+    local name = self:findTurtleName(workerId)
+    w.turtle_name = name
+    return name
+end
+
+--- Зарегистрировать воркера.
+function dispatcher:addWorker(id, info)
+    if not self.workers[id] then
+        self.workers[id] = { info = info or {}, state = "free", current_task = nil, last_seen = os.clock(), turtle_name = nil }
+        emit(self, "worker_join", { id = id, info = info })
+    else
+        self.workers[id].info = info or self.workers[id].info
+        self.workers[id].last_seen = os.clock()
+    end
+end
+
+function dispatcher:removeWorker(id)
+    if self.workers[id] then
+        if self.workers[id].current_task then
+            self:requeue(self.workers[id].current_task)
+        end
+        self.workers[id] = nil
+        emit(self, "worker_leave", { id = id })
+    end
+end
+
+function dispatcher:workerList()
+    local arr = {}
+    for id, w in pairs(self.workers) do
+        table.insert(arr, { id = id, state = w.state, info = w.info, current = w.current_task and w.current_task.id or nil })
+    end
+    table.sort(arr, function(a, b) return a.id < b.id end)
+    return arr
+end
+
+function dispatcher:freeCount()
+    local n = 0
+    for _, w in pairs(self.workers) do
+        if w.state == "free" then n = n + 1 end
+    end
+    return n
+end
+
+function dispatcher:findFree()
+    for id, w in pairs(self.workers) do
+        if w.state == "free" then return id, w end
+    end
+    return nil
+end
+
+--- Поставить задачу в очередь.
+function dispatcher:queueTask(recipe, count, stepInfo)
+    local task = {
+        id = newTaskId(),
+        recipe = recipe,
+        count = count,
+        status = "queued",
+        attempts = 0,
+        step = stepInfo,
+        progress = 0,
+        result = nil,
+    }
+    self.tasks[task.id] = task
+    table.insert(self.queue, task.id)
+    emit(self, "task_queued", { id = task.id, recipe = recipe.id, count = count })
+    return task.id
+end
+
+function dispatcher:requeue(task)
+    task.status = "queued"
+    task.worker_id = nil
+    table.insert(self.queue, task.id)
+    emit(self, "task_requeued", { id = task.id })
+end
+
+--- Подготовить ингредиенты: extract из хранилища ПРЯМО в инвентарь черепахи.
+function dispatcher:prepareIngredients(workerId, task)
+    local turtleName = self:workerName(workerId)
+    if not turtleName then
+        return false, "воркер " .. tostring(workerId) .. " не найден в сети (нет wired модема?)"
+    end
+    -- Очистить инвентарь черепахи от старых предметов (вернуть в хранилище)
+    self:collectResult(workerId)
+    local ings = recipes.ingredientsFor(task.recipe, task.count)
+    for _, ing in ipairs(ings) do
+        -- Кладём без указания слота — pushItems сам распределит
+        local moved = self.storage:extract(ing.id, ing.count, turtleName, nil)
+        if moved < ing.count then
+            -- Не хватило — откат (вернуть всё из черепахи в хранилище)
+            self:collectResult(workerId)
+            return false, "Не хватает " .. (ing.count - moved) .. " " .. lang.localize(ing.id)
+        end
+    end
+    return true
+end
+
+--- Забрать ВСЕ предметы из инвентаря черепахи в хранилище (результат + остатки).
+function dispatcher:collectResult(workerId)
+    local turtleName = self:workerName(workerId)
+    if not turtleName then return 0 end
+    local p = peripheral.wrap(turtleName)
+    if not p or not p.list then return 0 end
+    local items = p.list()
+    local total = 0
+    for slot, _ in pairs(items) do
+        total = total + self.storage:deposit(turtleName, slot, nil)
+    end
+    return total
+end
+
+--- Один тик планировщика.
+function dispatcher:tick()
+    if #self.queue == 0 then return end
+    local workerId = self:findFree()
+    if not workerId then return end
+    local taskId = table.remove(self.queue, 1)
+    local task = self.tasks[taskId]
+    if not task then return end
+
+    -- Машинные рецепты обрабатывает сам Core через machines
+    if task.recipe.type == "machine" then
+        if not self.machines then
+            task.status = "failed"
+            task.result = "модуль машин не подключён"
+            emit(self, "task_failed", { id = task.id, error = task.result })
+            return
+        end
+        task.status = "running"
+        task.worker_id = "machine"
+        emit(self, "task_started", { id = task.id, worker = "machine", recipe = task.recipe.id })
+        local ok, res = self.machines:process(task.recipe, task.count)
+        if ok then
+            task.status = "done"
+            task.result = { success = true, count = res }
+            emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = res })
+        else
+            task.status = "failed"
+            task.result = { success = false, error = res }
+            emit(self, "task_failed", { id = task.id, error = tostring(res) })
+        end
+        return
+    end
+
+    -- Обычный крафт черепахой
+    local ok, err = self:prepareIngredients(workerId, task)
+    if not ok then
+        task.attempts = task.attempts + 1
+        if task.attempts >= self.maxAttempts then
+            task.status = "failed"
+            task.result = err
+            emit(self, "task_failed", { id = task.id, error = err })
+        else
+            table.insert(self.queue, taskId)
+            emit(self, "task_retry", { id = task.id, error = err })
+        end
+        return
+    end
+    local w = self.workers[workerId]
+    w.state = "busy"
+    w.current_task = task
+    task.status = "running"
+    task.worker_id = workerId
+    task.attempts = task.attempts + 1
+    net.send(workerId, net.MSG.CRAFT_REQUEST, {
+        recipe = task.recipe,
+        count = task.count,
+        task_id = task.id,
+    })
+    emit(self, "task_started", { id = task.id, worker = workerId, recipe = task.recipe.id, count = task.count })
+end
+
+--- Обработать входящее сообщение (вызывается сервером).
+function dispatcher:handleMessage(senderId, msg)
+    if not msg or not msg.type then return end
+    if msg.type == net.MSG.WORKER_HELLO then
+        self:addWorker(senderId, msg.payload)
+    elseif msg.type == net.MSG.WORKER_BYE then
+        self:removeWorker(senderId)
+    elseif msg.type == net.MSG.STATUS then
+        local p = msg.payload or {}
+        local w = self.workers[senderId]
+        if w and w.current_task and w.current_task.id == p.task_id then
+            w.current_task.progress = p.progress or w.current_task.progress
+            emit(self, "task_progress", { id = p.task_id, progress = p.progress })
+        end
+    elseif msg.type == net.MSG.RESULT then
+        local p = msg.payload or {}
+        local w = self.workers[senderId]
+        if w and w.current_task and w.current_task.id == p.task_id then
+            local task = w.current_task
+            if p.success then
+                self:collectResult(senderId)
+                task.status = "done"
+                task.result = p
+                emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = p.count })
+            else
+                -- При ошибке тоже забираем остатки
+                self:collectResult(senderId)
+                task.status = "failed"
+                task.result = p
+                emit(self, "task_failed", { id = task.id, error = p.error or "воркер вернул ошибку" })
+            end
+            w.state = "free"
+            w.current_task = nil
+        end
+    elseif msg.type == net.MSG.HEARTBEAT then
+        if self.workers[senderId] then
+            self.workers[senderId].last_seen = os.clock()
+        end
+    end
+end
+
+--- Проверить зависших воркеров.
+function dispatcher:checkTimeouts(timeout)
+    timeout = timeout or 60
+    local now = os.clock()
+    for id, w in pairs(self.workers) do
+        if w.state == "busy" and (now - (w.last_seen or now)) > timeout then
+            util.warn("Воркер " .. id .. " завис, возвращаю задачу в очередь")
+            if w.current_task then self:requeue(w.current_task) end
+            w.state = "free"
+            w.current_task = nil
+        end
+    end
+end
+
+function dispatcher:activeTasks()
+    local arr = {}
+    for _, task in pairs(self.tasks) do
+        if task.status == "running" or task.status == "queued" then
+            table.insert(arr, task)
+        end
+    end
+    return arr
+end
+
+function dispatcher:allTasks()
+    local arr = {}
+    for _, task in pairs(self.tasks) do
+        table.insert(arr, task)
+    end
+    table.sort(arr, function(a, b) return a.id < b.id end)
+    return arr
+end
+
+--- Запрос крафта: строит план, ставит шаги в очередь.
+-- @param id ID предмета
+-- @param count сколько
+-- @param recipes объект recipes
+-- @return task_ids список, либо nil + сообщение об ошибке
+function dispatcher:requestCraft(id, count, recipes)
+    if not recipes:has(id) then
+        return nil, "Нет рецепта для " .. lang.localize(id)
+    end
+    local tree = planner.buildTree(id, count, recipes, self.storage)
+    local can, avail = planner.canCraft(tree, self.storage)
+    if not can then
+        local missing = {}
+        for mid, info in pairs(avail) do
+            if info.missing > 0 then
+                table.insert(missing, lang.localize(mid) .. " (надо " .. info.needed .. ", есть " .. info.available .. ", не хватает " .. info.missing .. ")")
+            end
+        end
+        return nil, "Не хватает ресурсов: " .. table.concat(missing, "; ")
+    end
+    local steps = planner.craftSteps(tree)
+    local taskIds = {}
+    for _, step in ipairs(steps) do
+        local tid = self:queueTask(step.recipe, step.count, { step_id = step.id, total_steps = #steps })
+        table.insert(taskIds, tid)
+    end
+    emit(self, "craft_planned", { id = id, count = count, steps = #steps })
+    return taskIds, "Запланировано шагов: " .. #steps
+end
+
+return dispatcher

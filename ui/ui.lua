@@ -441,10 +441,17 @@ function ui:renderRecipes(yTop, yBot, w)
         term.setTextColor(colors.cyan)
         local titles = {
             [1] = "1/3 Choose Mode",
-            [2] = "2/3 Choose Chest",
+            [2] = "2/3 Choose Grid Chest",
             [3] = (st.learnType == 2) and "3/3 Choose Machine" or "3/3 Choose Worker"
         }
         widgets.box(2, yTop, w - 2, yBot - yTop + 1, titles[st.wizardStep or 1], "double")
+        
+        local helpTexts = {
+            [1] = "Select learning method:",
+            [2] = "Select chest used as grid:",
+            [3] = (st.learnType == 2) and "Select furnace machine:" or "Select worker turtle:"
+        }
+        widgets.text(3, yTop + 1, helpTexts[st.wizardStep or 1], colors.lightGray, colors.black)
         
         local rows = {}
         if st.wizardStep == 1 then
@@ -654,7 +661,8 @@ function ui:handleListTouch(x, y)
     if not st then return end
     if tab == "recipes" and st.mode == "learn_select" then
         local yTop = 4
-        local idx = y - yTop + 1 + (st.wizardScroll or 0)
+        local yListTop = yTop + 2
+        local idx = y - yListTop + 1 + (st.wizardScroll or 0)
         local rows = {}
         if st.wizardStep == 1 then
             rows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }

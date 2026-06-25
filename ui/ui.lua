@@ -714,10 +714,10 @@ function ui:renderRecipes(yTop, yBot, w)
             end
         end
         self:button(1, yBot, 8, "-Delete", false, deleteAction, { bg = colors.red })
-        self:button(wLeft - 6, yBot, 3, "▲", false, function()
+        self:button(wLeft - 6, yBot, 3, "^", false, function()
             st.scroll = math.max(0, st.scroll - (listH - 2))
         end)
-        self:button(wLeft - 2, yBot, 3, "▼", false, function()
+        self:button(wLeft - 2, yBot, 3, "v", false, function()
             if st.scroll + listH < #rows then
                 st.scroll = st.scroll + (listH - 2)
             end
@@ -789,10 +789,10 @@ function ui:renderRecipes(yTop, yBot, w)
             widgets.list(startX, yTop + 2, wRight, wListH, wRows, st.wizardScroll or 0, st.wizardSelected or 1)
             
             if #wRows > wListH then
-                self:button(w - 7, yTop + 2, 3, "▲", false, function()
+                self:button(w - 7, yTop + 2, 3, "^", false, function()
                     st.wizardScroll = math.max(0, (st.wizardScroll or 0) - 1)
                 end)
-                self:button(w - 7, yBot - 1, 3, "▼", false, function()
+                self:button(w - 7, yBot - 1, 3, "v", false, function()
                     if (st.wizardScroll or 0) + wListH < #wRows then
                         st.wizardScroll = (st.wizardScroll or 0) + 1
                     end
@@ -803,22 +803,24 @@ function ui:renderRecipes(yTop, yBot, w)
             local btnLabel = isLastStep and "Record" or "Next"
             
             if st.wizardStep > 1 then
-                self:button(startX, yBot, 4, "Back", false, function()
+                local btnX = startX + math.floor((wRight - 18) / 2)
+                self:button(btnX, yBot, 4, "Back", false, function()
                     st.wizardStep = st.wizardStep - 1
                     st.wizardSelected = 1
                     st.wizardScroll = 0
                 end, { bg = colors.gray })
-                self:button(startX + 5, yBot, 6, "Cancel", false, function()
+                self:button(btnX + 5, yBot, 6, "Cancel", false, function()
                     st.mode = "list"
                 end, { bg = colors.red })
-                self:button(startX + 12, yBot, 6, btnLabel, true, function()
+                self:button(btnX + 12, yBot, 6, btnLabel, true, function()
                     self:wizardNext(wRows)
                 end, { bgActive = colors.green })
             else
-                self:button(startX, yBot, 8, "Cancel", false, function()
+                local btnX = startX + math.floor((wRight - 18) / 2)
+                self:button(btnX, yBot, 8, "Cancel", false, function()
                     st.mode = "list"
                 end, { bg = colors.red })
-                self:button(startX + 10, yBot, 8, "Next", true, function()
+                self:button(btnX + 10, yBot, 8, "Next", true, function()
                     self:wizardNext(wRows)
                 end, { bgActive = colors.green })
             end
@@ -893,17 +895,21 @@ function ui:renderRecipes(yTop, yBot, w)
                     end
                 end
                 
-                self:button(startX, yBot, 8, " + New ", false, function()
+                local totalW = 19
+                local btnX = startX + math.floor((wRight - totalW) / 2)
+                self:button(btnX, yBot, 8, " + New ", false, function()
                     self:startWizard()
                 end, { bgActive = colors.green })
-                self:button(startX + 10, yBot, 9, "Rewrite", false, function()
+                self:button(btnX + 10, yBot, 9, "Rewrite", false, function()
                     self:startWizard()
                 end)
             else
                 widgets.clearArea(startX, yTop, wRight, h)
                 local centerY = math.floor((yTop + yBot) / 2)
                 widgets.text(startX + math.floor((wRight - #("Select recipe")) / 2), centerY, "Select recipe", colors.gray)
-                self:button(startX, yBot, 10, " + Record ", false, function()
+                local btnW = 12
+                local btnX = startX + math.floor((wRight - btnW) / 2)
+                self:button(btnX, yBot, btnW, " + Record ", false, function()
                     self:startWizard()
                 end, { bgActive = colors.green })
             end

@@ -117,12 +117,16 @@ function config.resolve(cfg)
             -- фильтруем существующие
             for _, name in ipairs(manual) do
                 if peripheral.isPresent(name) then
-                    table.insert(result[k], name)
+                    if not (k == "storage" and cfg.grid_chest == name) then
+                        table.insert(result[k], name)
+                    end
                 end
             end
         else
             for _, name in ipairs(auto[k] or {}) do
-                table.insert(result[k], name)
+                if not (k == "storage" and cfg.grid_chest == name) then
+                    table.insert(result[k], name)
+                end
             end
         end
     end

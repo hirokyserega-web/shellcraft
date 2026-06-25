@@ -19,6 +19,7 @@ end
 -- @param title заголовок (опц.)
 -- @param style "single" | "double"
 function widgets.box(x, y, w, h, title, style)
+    widgets.clearArea(x, y, w, h)
     local chars = style == "double" and {
         tl = "+", tr = "+", bl = "+", br = "+",
         h = "=", v = "|",

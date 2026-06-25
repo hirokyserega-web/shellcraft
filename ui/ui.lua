@@ -553,9 +553,59 @@ end
 ----------------------------------------------------------------
 -- Вкладка РЕЦЕПТЫ
 ----------------------------------------------------------------
-----------------------------------------------------------------
--- Вкладка РЕЦЕПТЫ
-----------------------------------------------------------------
+--- Быстрая запись рецепта: сундук-сетка → черепашка → крафт → результат → сохранение.
+-- Пользователь кладёт ингредиенты в слоты 1-9 сундука-сетки, нажимает кнопку,
+-- система автоматически находит свободную черепашку, отправляет предметы,
+-- крафтит, забирает результат и сохраняет рецепт.
+function ui:quickRecord()
+    local gridChest = self.configData.grid_chest
+    if not gridChest then
+        self:addLog("Error: Set grid chest in Settings tab first")
+        return
+    end
+    
+    -- Проверяем что сундук доступен
+    local pGrid = peripheral.wrap(gridChest)
+    if not pGrid or type(pGrid.list) ~= "function" then
+        self:addLog("Error: Grid chest not found: " .. gridChest)
+        return
+    end
+    
+    -- Проверяем есть ли предметы в слотах 1-9
+    local gridList = pGrid.list()
+    local hasItems = false
+    for slot = 1, math.min(9, pGrid.size()) do
+        if gridList[slot] then hasItems = true; break end
+    end
+    if not hasItems then
+        self:addLog("Error: Place items in slots 1-9 of grid chest")
+        return
+    end
+    
+    -- Ищем первого доступного воркера
+    if not self.deps.dispatcher then
+        self:addLog("Error: No dispatcher available")
+        return
+    end
+    
+    local wList = self.deps.dispatcher:workerList()
+    if #wList == 0 then
+        self:addLog("Error: No workers connected")
+        return
+    end
+    
+    local workerId = wList[1].id
+    
+    self:addLog("Auto-crafting via Worker #" .. workerId .. "...")
+    
+    local ok, recipe = self.deps.recipes:activeLearnCraft(gridChest, workerId, self.deps.dispatcher)
+    if ok then
+        self:addLog("Saved: " .. self.deps.lang.display(recipe.id) .. " x" .. (recipe.output or 1))
+    else
+        self:addLog("Error: " .. tostring(recipe))
+    end
+end
+
 function ui:startWizard()
     local st = self.state.recipes
     st.mode = "learn_select"
@@ -897,22 +947,29 @@ function ui:renderRecipes(yTop, yBot, w)
                     end
                 end
                 
-                local totalW = 19
+                local totalW = 22
                 local btnX = startX + math.floor((wRight - totalW) / 2)
-                self:button(btnX, yBot, 8, " + New ", false, function()
-                    self:startWizard()
+                self:button(btnX, yBot, 10, "Record", false, function()
+                    self:quickRecord()
                 end, { bgActive = colors.green })
-                self:button(btnX + 10, yBot, 9, "Rewrite", false, function()
+                self:button(btnX + 12, yBot, 10, "Advanced", false, function()
                     self:startWizard()
                 end)
             else
                 local centerY = math.floor((yTop + yBot) / 2)
-                widgets.text(startX + math.floor((wRight - #("Select recipe")) / 2), centerY, "Select recipe", colors.gray)
-                local btnW = 12
-                local btnX = startX + math.floor((wRight - btnW) / 2)
-                self:button(btnX, yBot, btnW, " + Record ", false, function()
-                    self:startWizard()
+                local helpMsg = "Put items in grid chest"
+                widgets.text(startX + math.floor((wRight - #helpMsg) / 2), centerY - 1, helpMsg, colors.gray)
+                local helpMsg2 = "slots 1-9, then Record"
+                widgets.text(startX + math.floor((wRight - #helpMsg2) / 2), centerY + 1, helpMsg2, colors.gray)
+                
+                local totalW = 22
+                local btnX = startX + math.floor((wRight - totalW) / 2)
+                self:button(btnX, yBot, 10, "Record", false, function()
+                    self:quickRecord()
                 end, { bgActive = colors.green })
+                self:button(btnX + 12, yBot, 10, "Advanced", false, function()
+                    self:startWizard()
+                end)
             end
         end
         
@@ -1022,9 +1079,12 @@ function ui:renderRecipes(yTop, yBot, w)
             widgets.list(1, yTop, w, h - 2, rows, st.scroll, st.selected)
         end
         
-        self:button(2, yBot - 1, 16, " + Record ", false, function()
-            self:startWizard()
+        self:button(2, yBot - 1, 10, "Record", false, function()
+            self:quickRecord()
         end, { bgActive = colors.green })
+        self:button(13, yBot - 1, 6, "More", false, function()
+            self:startWizard()
+        end)
         self:button(20, yBot - 1, 14, " - Delete ", false, function()
             if list[st.selected] then
                 recipes:remove(list[st.selected].id)

@@ -18,6 +18,7 @@ config.defaults = {
     use_russian_names = false, -- Requires a Cyrillic font resource pack or transliteration
     text_scale = 0.5,          -- Text scale for monitor (e.g. 1.0 or 0.5)
     grid_chest = nil,          -- default storage grid chest for recording recipes
+    github_token = nil,        -- GitHub PAT token for private repos or rate limit bypass
     -- Ручное переопределение периферии (пусто = автоопределение)
     peripherals = {
         storage   = {},        -- список имён chest/barrel

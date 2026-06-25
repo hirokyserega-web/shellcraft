@@ -66,6 +66,13 @@ function updater.fetch(url)
         ["Expires"] = "0"
     }
     
+    if config and config.load then
+        local ok, cfg = pcall(config.load)
+        if ok and cfg and cfg.github_token and cfg.github_token ~= "" then
+            headers["Authorization"] = "token " .. cfg.github_token
+        end
+    end
+    
     local retries = 3
     for attempt = 1, retries do
         local response = http.get(busterUrl, headers)

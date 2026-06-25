@@ -212,7 +212,7 @@ function ui:footerHint()
         return "Tap digits/OK. Cancel - back."
     elseif tab == "storage" then return "Scroll by tapping edges. X - exit."
     elseif tab == "machines" then return "Tap - refresh status."
-    elseif tab == "recipes" then return "Tap - select. [+Learn] - new recipe."
+    elseif tab == "recipes" then return "Tap - select. [+Record] - new recipe."
     elseif tab == "log" then return "Scroll by tapping edges."
     end
     return ""
@@ -564,7 +564,7 @@ function ui:renderRecipes(yTop, yBot, w)
         widgets.box(2, yTop, w - 2, yBot - yTop + 1, titles[st.wizardStep or 1], "double")
         
         local helpTexts = {
-            [1] = "Select learning method:",
+            [1] = "Select recording method:",
             [2] = "Select chest used as grid:",
             [3] = (st.learnType == 2) and "Select furnace machine:" or "Select worker turtle:"
         }
@@ -635,7 +635,7 @@ function ui:renderRecipes(yTop, yBot, w)
         end, { bg = colors.red })
         
         local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
-        local btnLabel = isLastStep and "Learn" or "Next"
+        local btnLabel = isLastStep and "Record" or "Next"
         self:button(startX + (btnW + 1) * 2, yBot - 1, btnW, btnLabel, true, function()
             local selectedVal = rows[st.wizardSelected or 1]
             if not selectedVal and not isLastStep then return end
@@ -702,7 +702,7 @@ function ui:renderRecipes(yTop, yBot, w)
         widgets.list(1, yTop, w, h - 2, rows, st.scroll, st.selected)
     end
     -- Кнопки внизу
-    self:button(2, yBot - 1, 16, " + Learn ", false, function()
+    self:button(2, yBot - 1, 16, " + Record ", false, function()
         st.mode = "learn_select"
         st.wizardStep = 1
         st.learnType = 1

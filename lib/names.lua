@@ -35,25 +35,91 @@ function names.transliterate(str)
     local result = {}
     local i = 1
     local len = #str
+    
+    local lat_upper = {
+        "A", "B", "V", "G", "D", "E", "Zh", "Z", "I", "Y", "K", "L", "M", "N", "O", "P",
+        "R", "S", "T", "U", "F", "Kh", "Ts", "Ch", "Sh", "Shch", "", "Y", "", "E", "Yu", "Ya"
+    }
+    local lat_lower = {
+        "a", "b", "v", "g", "d", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
+        "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya"
+    }
+    
     while i <= len do
-        local c = str:sub(i, i)
-        local b = c:byte(1)
-        if b >= 192 and b <= 223 then
-            local utf8_char = str:sub(i, i + 1)
-            local lat = cyr_to_lat[utf8_char]
-            if lat then
-                table.insert(result, lat)
-            else
-                table.insert(result, utf8_char)
+        local b1 = str:byte(i)
+        local done = false
+        
+        -- 1. UTF-8 Cyrillic
+        if i < len and (b1 == 208 or b1 == 209) then
+            local b2 = str:byte(i + 1)
+            local char_str = nil
+            if b1 == 208 then
+                if b2 >= 144 and b2 <= 175 then
+                    char_str = lat_upper[b2 - 144 + 1]
+                elseif b2 >= 176 and b2 <= 191 then
+                    char_str = lat_lower[b2 - 176 + 1]
+                elseif b2 == 129 then
+                    char_str = "Yo"
+                end
+            elseif b1 == 209 then
+                if b2 >= 128 and b2 <= 143 then
+                    char_str = lat_lower[b2 - 128 + 17]
+                elseif b2 == 145 then
+                    char_str = "yo"
+                end
             end
-            i = i + 2
-        else
-            local lat = cyr_to_lat[c]
-            if lat then
-                table.insert(result, lat)
-            else
-                table.insert(result, c)
+            if char_str then
+                table.insert(result, char_str)
+                i = i + 2
+                done = true
             end
+        end
+        
+        -- 2. CP1251 Cyrillic
+        if not done then
+            local char_str = nil
+            if b1 >= 192 and b1 <= 223 then
+                char_str = lat_upper[b1 - 192 + 1]
+            elseif b1 >= 224 and b1 <= 255 then
+                char_str = lat_lower[b1 - 224 + 1]
+            elseif b1 == 168 then
+                char_str = "Yo"
+            elseif b1 == 184 then
+                char_str = "yo"
+            end
+            if char_str then
+                table.insert(result, char_str)
+                i = i + 1
+                done = true
+            end
+        end
+        
+        -- 3. CP866 Cyrillic
+        if not done then
+            local char_str = nil
+            if b1 >= 128 and b1 <= 143 then
+                char_str = lat_upper[b1 - 128 + 1]
+            elseif b1 >= 144 and b1 <= 159 then
+                char_str = lat_upper[b1 - 144 + 17]
+            elseif b1 >= 160 and b1 <= 175 then
+                char_str = lat_lower[b1 - 160 + 1]
+            elseif b1 >= 224 and b1 <= 239 then
+                char_str = lat_lower[b1 - 224 + 17]
+            elseif b1 == 240 then
+                char_str = "Yo"
+            elseif b1 == 241 then
+                char_str = "yo"
+            end
+            if char_str then
+                table.insert(result, char_str)
+                i = i + 1
+                done = true
+            end
+        end
+        
+        -- 4. Standard ASCII
+        if not done then
+            table.insert(result, string.char(b1))
             i = i + 1
         end
     end
@@ -105,6 +171,13 @@ function names.logMissing(id)
     end
 end
 
+local function isInvalidName(str)
+    if not str then return true end
+    if str:find("?") then return true end
+    if str:gsub("%s+", "") == "" then return true end
+    return false
+end
+
 --- Загрузить кеш имён и множество отсутствующих с диска.
 function names.init()
     local cfg = config.load()
@@ -113,7 +186,13 @@ function names.init()
     if util.fileExists(names.CACHE_FILE) then
         local data = util.loadData(names.CACHE_FILE, {})
         if type(data) == "table" then
-            names.cache = data
+            for k, v in pairs(data) do
+                if not isInvalidName(v) then
+                    names.cache[k] = v
+                else
+                    dirty = true
+                end
+            end
         end
     end
     -- множество уже залогированных отсутствующих
@@ -133,7 +212,7 @@ end
 
 --- Запомнить displayName предмета (из getItemDetail / сканирования).
 function names.cacheName(id, displayName)
-    if not id or not displayName or displayName == "" then return end
+    if not id or isInvalidName(displayName) then return end
     local s = tostring(id)
     if names.cache[s] ~= displayName then
         names.cache[s] = displayName
@@ -157,12 +236,12 @@ function names.display(id, detail)
     if not id then return "?" end
     local s = tostring(id)
     -- 1. Русское имя из автособранного словаря (только если разрешено)
-    if names.use_russian_names and ru and ru.dict and ru.dict[s] then
+    if names.use_russian_names and ru and ru.dict and ru.dict[s] and not isInvalidName(ru.dict[s]) then
         return ru.dict[s]
     end
     -- 2. displayName из detail (если передали) — заодно кешируем
     local dn = extractDisplay(detail)
-    if dn then
+    if dn and not isInvalidName(dn) then
         names.cacheName(s, dn)
         if not names.use_russian_names then
             return names.transliterate(dn)
@@ -170,7 +249,7 @@ function names.display(id, detail)
         return dn
     end
     -- 3. Кеш (собранный ранее из getItemDetail)
-    if names.cache[s] then
+    if names.cache[s] and not isInvalidName(names.cache[s]) then
         local cached = names.cache[s]
         if not names.use_russian_names then
             return names.transliterate(cached)
@@ -178,7 +257,7 @@ function names.display(id, detail)
         return cached
     end
     -- 3.5. Запасной вариант: транслитерация русского имени, если нет оригинального
-    if ru and ru.dict and ru.dict[s] then
+    if ru and ru.dict and ru.dict[s] and not isInvalidName(ru.dict[s]) then
         return names.transliterate(ru.dict[s])
     end
     -- 4. Fallback: красивый ID + лог отсутствия

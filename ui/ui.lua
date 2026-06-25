@@ -138,8 +138,13 @@ function ui:render()
         status = string.format("Workers: %d/%d [Act: %d]", total - free, total, active)
     end
     term.setTextColor(colors.white)
-    term.setCursorPos(math.max(2, w - #status - 1), 1)
+    term.setCursorPos(math.max(2, w - #status - 4), 1)
     term.write(status)
+
+    -- Red exit button on-screen
+    self:button(w - 2, 1, 3, "X", false, function()
+        os.queueEvent("shellcraft_quit")
+    end, { bg = colors.red, fg = colors.white })
 
     -- Вкладки
     self:buildTabs()
@@ -203,9 +208,9 @@ function ui:footerHint()
     local tab = self.activeTab
     if tab == "craft" then
         local m = self.state.craft.mode
-        if m == "list" then return "Tap - select recipe. Q - exit." end
+        if m == "list" then return "Tap - select recipe. X - exit." end
         return "Tap digits/OK. Cancel - back."
-    elseif tab == "storage" then return "Scroll by tapping edges. Q - exit."
+    elseif tab == "storage" then return "Scroll by tapping edges. X - exit."
     elseif tab == "machines" then return "Tap - refresh status."
     elseif tab == "recipes" then return "Tap - select. [+Learn] - new recipe."
     elseif tab == "log" then return "Scroll by tapping edges."
@@ -256,132 +261,222 @@ function ui:renderCraft(yTop, yBot, w)
         local inStore = self.deps.storage:count(r.id)
         local qty = tonumber(st.qty) or 1
         
-        if h < 14 then
-            -- COMPACT LAYOUT for small monitors
-            widgets.text(4, yTop + 1, name:sub(1, w - 6), colors.white, colors.black)
-            widgets.text(4, yTop + 2, string.format("Have: %d  Out: %d", inStore, r.output or 1), colors.lightGray, colors.black)
-            widgets.text(4, yTop + 3, "Quantity: " .. st.qty, colors.yellow, colors.black)
-            
-            -- Buttons row 1 (yTop + 4)
-            local bx = 4
-            self:button(bx, yTop + 4, 4, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
-            self:button(bx + 5, yTop + 4, 4, "+1", false, function() st.qty = tostring(qty + 1) end)
-            self:button(bx + 10, yTop + 4, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
-            self:button(bx + 16, yTop + 4, 6, "Reset", false, function() st.qty = "1" end)
-            
-            -- OK / Cancel (yBot - 1)
-            local okX = math.floor((w - 18) / 2) + 1
-            self:button(okX, yBot - 1, 8, "OK", true, function()
-                local n = tonumber(st.qty) or 0
-                if n > 0 then
-                    local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
-                    if ids then
-                        self:addLog("Order: " .. name .. " x" .. n)
-                        self.state.craft.active = {
-                            total = #ids, done = 0, failed = 0,
-                            started = os.epoch("utc"),
-                        }
-                    else
-                        self:addLog("Error: " .. tostring(err))
-                    end
+        local showNumpad = (w >= 32)
+        local numpadX = w - 13
+        local leftW = showNumpad and (numpadX - 4) or (w - 6)
+        
+        -- Left side info
+        widgets.text(4, yTop + 1, "Item: " .. name:sub(1, leftW), colors.white, colors.black)
+        widgets.text(4, yTop + 2, string.format("Have: %d  Out: %d", inStore, r.output or 1):sub(1, leftW), colors.lightGray, colors.black)
+        widgets.text(4, yTop + 3, ("Qty: " .. st.qty):sub(1, leftW), colors.yellow, colors.black)
+        
+        -- Numpad on the right
+        if showNumpad then
+            local keys_num = {
+                {"1", "2", "3"},
+                {"4", "5", "6"},
+                {"7", "8", "9"},
+                {"<-", "0", "C"}
+            }
+            for rowIdx, rKeys in ipairs(keys_num) do
+                local ry = yTop + rowIdx
+                for colIdx, k in ipairs(rKeys) do
+                    local rx = numpadX + (colIdx - 1) * 4
+                    local btnW = 3
+                    self:button(rx, ry, btnW, k, false, function()
+                        if k == "<-" then
+                            st.qty = st.qty:sub(1, -2)
+                            if st.qty == "" then st.qty = "1" end
+                        elseif k == "C" then
+                            st.qty = "1"
+                        else
+                            if st.qty == "0" or (st.qty == "1" and #st.qty == 1) then
+                                st.qty = k
+                            else
+                                st.qty = st.qty .. k
+                            end
+                        end
+                    end)
                 end
-                st.mode = "list"; st.qty = "1"
-            end, { bgActive = colors.green })
-            self:button(okX + 9, yBot - 1, 8, "Cancel", false, function()
-                st.mode = "list"; st.qty = "1"
-            end, { bg = colors.red })
-            
-        else
-            -- DETAILED LAYOUT for larger monitors
-            widgets.text(4, yTop + 1, "Item: " .. name, colors.white, colors.black)
-            widgets.text(4, yTop + 2, string.format("Output: %d   In Storage: %d", r.output or 1, inStore), colors.lightGray, colors.black)
-            widgets.text(4, yTop + 3, "Quantity: " .. st.qty, colors.yellow, colors.black)
-            
-            -- Estimate
+            end
+        end
+        
+        -- BOM & Timing Details on the left (if detailed layout)
+        if h >= 14 then
             if qty > 0 then
                 local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage)
                 local bom = planner.calculateBOM(tree)
                 local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
-                widgets.text(4, yTop + 4, "ETA: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green, colors.black)
+                widgets.text(4, yTop + 4, ("ETA: " .. planner.formatDuration(estTime, approx)):sub(1, leftW), approx and colors.yellow or colors.green, colors.black)
                 
                 -- Draw BOM list if we have height
                 local y = yTop + 6
                 if h >= 16 then
                     widgets.text(4, y, "Requires:", colors.cyan, colors.black)
                     y = y + 1
-                    for _, info in ipairs(bom) do
-                        if y < yBot - 3 then
-                            local have = self.deps.storage:count(info.id)
-                            local col = have >= info.count and colors.green or colors.red
-                            widgets.text(5, y, string.format("  %-16s %d/%d", 
-                                self.deps.lang.display(info.id):sub(1, 16), have, info.count), col, colors.black)
-                            y = y + 1
+                    local itemW = leftW - 10
+                    if itemW >= 4 then
+                        for _, info in ipairs(bom) do
+                            if y < yBot - 3 then
+                                local have = self.deps.storage:count(info.id)
+                                local col = have >= info.count and colors.green or colors.red
+                                widgets.text(4, y, string.format("  %-" .. itemW .. "s %d/%d", 
+                                    self.deps.lang.display(info.id):sub(1, itemW), have, info.count):sub(1, leftW), col, colors.black)
+                                y = y + 1
+                            end
                         end
                     end
                 end
             end
-            
-            -- Buttons row (yBot - 2)
-            if w >= 39 then
-                local btnW = 5
-                local totalW = 6 * 5 + 5 * 1
-                local startX = math.floor((w - totalW) / 2) + 1
-                self:button(startX, yBot - 2, 5, "-10", false, function() st.qty = tostring(math.max(1, qty - 10)) end)
-                self:button(startX + 6, yBot - 2, 5, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
-                self:button(startX + 12, yBot - 2, 5, "+1", false, function() st.qty = tostring(qty + 1) end)
-                self:button(startX + 18, yBot - 2, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
-                self:button(startX + 24, yBot - 2, 5, "+64", false, function() st.qty = tostring(qty + 64) end)
-                self:button(startX + 30, yBot - 2, 5, "Rst", false, function() st.qty = "1" end)
-            else
-                local startX = math.floor((w - 23) / 2) + 1
-                self:button(startX, yBot - 3, 5, "-10", false, function() st.qty = tostring(math.max(1, qty - 10)) end)
-                self:button(startX + 6, yBot - 3, 5, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
-                self:button(startX + 12, yBot - 3, 5, "+1", false, function() st.qty = tostring(qty + 1) end)
-                self:button(startX + 18, yBot - 3, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
-                
-                local startX2 = math.floor((w - 15) / 2) + 1
-                self:button(startX2, yBot - 2, 7, "+64", false, function() st.qty = tostring(qty + 64) end)
-                self:button(startX2 + 8, yBot - 2, 7, "Reset", false, function() st.qty = "1" end)
-            end
-            
-            -- OK / Cancel (yBot - 1)
-            local okW = 9
-            local startX3 = math.floor((w - (okW * 2 + 2)) / 2) + 1
-            self:button(startX3, yBot - 1, okW, "OK", true, function()
-                local n = tonumber(st.qty) or 0
-                if n > 0 then
-                    local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
-                    local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
-                    local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
-                    if ids then
-                        self:addLog("Order: " .. name .. " x" .. n .. " (" .. #ids .. " steps)")
-                        self.state.craft.active = {
-                            total = #ids, done = 0, failed = 0,
-                            etaTotal = estTime, started = os.epoch("utc"),
-                        }
-                    else
-                        self:addLog("Error: " .. tostring(err))
-                    end
-                end
-                st.mode = "list"; st.qty = "1"
-            end, { bgActive = colors.green })
-            self:button(startX3 + okW + 2, yBot - 1, okW, "Cancel", false, function()
-                st.mode = "list"; st.qty = "1"
-            end, { bg = colors.red })
         end
+        
+        -- Incremental Adjustment Buttons
+        local btnY = yTop + 5
+        if not showNumpad then
+            if btnY < yBot - 1 then
+                self:button(4, btnY, 5, "-10", false, function() st.qty = tostring(math.max(1, qty - 10)) end)
+                self:button(10, btnY, 4, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
+                self:button(15, btnY, 4, "+1", false, function() st.qty = tostring(qty + 1) end)
+                self:button(20, btnY, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
+                self:button(4, btnY + 1, 6, "+64", false, function() st.qty = tostring(qty + 64) end)
+                self:button(11, btnY + 1, 6, "Reset", false, function() st.qty = "1" end)
+            else
+                self:button(4, yTop + 4, 4, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
+                self:button(9, yTop + 4, 4, "+1", false, function() st.qty = tostring(qty + 1) end)
+            end
+        else
+            if h >= 14 and btnY < yBot - 1 then
+                self:button(4, yBot - 3, 5, "+1", false, function() st.qty = tostring(qty + 1) end)
+                self:button(10, yBot - 3, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
+                self:button(16, yBot - 3, 5, "+64", false, function() st.qty = tostring(qty + 64) end)
+            end
+        end
+        
+        -- OK / Cancel (yBot - 1)
+        local okW = math.min(10, math.floor((w - 6) / 2))
+        local okX = 4
+        local cancelX = w - okW - 2
+        
+        self:button(okX, yBot - 1, okW, "OK", true, function()
+            local n = tonumber(st.qty) or 0
+            if n > 0 then
+                local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
+                local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
+                local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
+                if ids then
+                    self:addLog("Order: " .. name .. " x" .. n .. " (" .. #ids .. " steps)")
+                    self.state.craft.active = {
+                        total = #ids, done = 0, failed = 0,
+                        etaTotal = estTime, started = os.epoch("utc"),
+                    }
+                else
+                    self:addLog("Error: " .. tostring(err))
+                end
+            end
+            st.mode = "list"; st.qty = "1"
+        end, { bgActive = colors.green })
+        
+        self:button(cancelX, yBot - 1, okW, "Cancel", false, function()
+            st.mode = "list"; st.qty = "1"
+        end, { bg = colors.red })
     end
 end
 
 ----------------------------------------------------------------
 -- Вкладка ХРАНИЛИЩЕ
 ----------------------------------------------------------------
+function ui:drawKeyboard(x, y)
+    local keys_row1 = {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"}
+    local keys_row2 = {"a", "s", "d", "f", "g", "h", "j", "k", "l", "_"}
+    local keys_row3 = {"z", "x", "c", "v", "b", "n", "m", "-", ".", "<-"}
+    
+    local startX = x
+    local btnW = 2
+    local st = self.state.storage
+    
+    -- Draw row 1
+    for idx, k in ipairs(keys_row1) do
+        local bx = startX + (idx - 1) * 3
+        self:button(bx, y, btnW, k, false, function()
+            st.search = st.search .. k
+            st.scroll = 0
+            st.selected = 1
+        end)
+    end
+    
+    -- Draw row 2
+    for idx, k in ipairs(keys_row2) do
+        local bx = startX + (idx - 1) * 3
+        local action = function()
+            if k == "_" then
+                st.search = st.search .. " "
+            else
+                st.search = st.search .. k
+            end
+            st.scroll = 0
+            st.selected = 1
+        end
+        local label = (k == "_") and "sp" or k
+        self:button(bx, y + 1, btnW, label, false, action)
+    end
+    
+    -- Draw row 3
+    for idx, k in ipairs(keys_row3) do
+        local bx = startX + (idx - 1) * 3
+        local action = function()
+            if k == "<-" then
+                st.search = st.search:sub(1, -2)
+            else
+                st.search = st.search .. k
+            end
+            st.scroll = 0
+            st.selected = 1
+        end
+        self:button(bx, y + 2, btnW, k, false, action)
+    end
+    
+    -- Draw row 4: Clear and Hide
+    self:button(startX, y + 3, 8, " Clear ", false, function()
+        st.search = ""
+        st.scroll = 0
+        st.selected = 1
+    end, { bg = colors.red })
+    
+    self:button(startX + 10, y + 3, 8, " Hide ", false, function()
+        st.showKeyboard = false
+    end, { bg = colors.green })
+end
+
 function ui:renderStorage(yTop, yBot, w)
     local st = self.state.storage
     local items = self.deps.storage:items()
-    -- Поле поиска (верхняя строка контента)
+    
+    -- Keyboard toggle and Clear buttons
+    if w >= 39 then
+        self:button(w - 21, yTop, 8, "Keyboard", st.showKeyboard, function()
+            st.showKeyboard = not st.showKeyboard
+        end)
+        self:button(w - 12, yTop, 8, " Clear ", false, function()
+            st.search = ""
+            st.scroll = 0
+            st.selected = 1
+        end, { bg = colors.red })
+    else
+        self:button(w - 15, yTop, 7, "Keybrd", st.showKeyboard, function()
+            st.showKeyboard = not st.showKeyboard
+        end)
+        self:button(w - 7, yTop, 6, "Clear", false, function()
+            st.search = ""
+            st.scroll = 0
+            st.selected = 1
+        end, { bg = colors.red })
+    end
+
+    -- Draw search bar
     widgets.text(1, yTop, "Search: " .. st.search .. "_", colors.yellow)
     local search = st.search:lower()
-    -- Фильтрация
+    
+    -- Filter
     local filtered = {}
     for _, it in ipairs(items) do
         local name = self.deps.lang.display(it.id):lower()
@@ -389,23 +484,45 @@ function ui:renderStorage(yTop, yBot, w)
             table.insert(filtered, it)
         end
     end
-    local h = yBot - yTop + 1 - 1  -- минус строка поиска
+    
+    -- Height calculation (list height is reduced if virtual keyboard is open)
+    local listH = yBot - yTop
+    local listBot = yBot
+    if st.showKeyboard then
+        listH = yBot - yTop - 4
+        listBot = yBot - 4
+    end
+    
     local rows = {}
     for _, it in ipairs(filtered) do
         local name = self.deps.lang.display(it.id)
         table.insert(rows, string.format("%-26s x%d", name:sub(1, 26), it.count))
     end
+    
     if #rows == 0 then
-        widgets.center(math.floor((yTop + yBot) / 2), "Nothing found", colors.gray)
+        widgets.clearArea(1, yTop + 1, w, listH)
+        widgets.center(math.floor((yTop + listBot) / 2), "Nothing found", colors.gray)
+        -- Still draw keyboard if needed
+        if st.showKeyboard then
+            self:drawKeyboard(math.max(2, math.floor((w - 29) / 2) + 1), yBot - 3)
+        end
         return
     end
-    widgets.list(1, yTop + 1, w, h, rows, st.scroll, st.selected)
-    self:button(w - 4, yTop + 1, 4, " Up ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
-    self:button(w - 4, yBot, 4, " Down ", false, function()
-        if st.scroll + h < #rows then st.scroll = st.scroll + (h - 2) end
+    
+    widgets.list(1, yTop + 1, w, listH, rows, st.scroll, st.selected)
+    
+    self:button(w - 4, yTop + 1, 4, " Up ", false, function()
+        st.scroll = math.max(0, st.scroll - (listH - 2))
     end)
-    self:button(w - 12, yTop, 8, " Clear ", false, function() st.search = ""; st.scroll = 0; st.selected = 1 end,
-        { bg = colors.red })
+    self:button(w - 4, listBot, 4, " Down ", false, function()
+        if st.scroll + listH < #rows then
+            st.scroll = st.scroll + (listH - 2)
+        end
+    end)
+    
+    if st.showKeyboard then
+        self:drawKeyboard(math.max(2, math.floor((w - 29) / 2) + 1), yBot - 3)
+    end
 end
 
 ----------------------------------------------------------------

@@ -126,7 +126,7 @@ function ui:render()
     -- Title left-aligned
     term.setTextColor(colors.yellow)
     term.setCursorPos(2, 1)
-    term.write("📦 ShellCraft")
+    term.write(" ShellCraft")
 
     -- Status right-aligned
     local status = ""
@@ -149,7 +149,7 @@ function ui:render()
     term.setCursorPos(1, 3)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.gray)
-    term.write(string.rep("─", w))
+    term.write(string.rep("-", w))
 
     -- Контент
     local tab = self.activeTab

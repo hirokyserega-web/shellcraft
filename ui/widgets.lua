@@ -20,11 +20,11 @@ end
 -- @param style "single" | "double"
 function widgets.box(x, y, w, h, title, style)
     local chars = style == "double" and {
-        tl = "╔", tr = "╗", bl = "╚", br = "╝",
-        h = "═", v = "║",
+        tl = "+", tr = "+", bl = "+", br = "+",
+        h = "=", v = "|",
     } or {
-        tl = "┌", tr = "┐", bl = "└", br = "┘",
-        h = "─", v = "│",
+        tl = "+", tr = "+", bl = "+", br = "+",
+        h = "-", v = "|",
     }
     -- Верх
     term.setCursorPos(x, y)
@@ -136,13 +136,13 @@ function widgets.scrollbar(x, y, h, total, scroll)
     term.setBackgroundColor(colors.black)
     for i = 0, h - 1 do
         term.setCursorPos(x, y + i)
-        term.write("│")
+        term.write("|")
     end
     if total > h then
         local thumbPos = y + math.floor(scroll / (total - h) * (h - 1))
         term.setCursorPos(x, thumbPos)
         term.setBackgroundColor(colors.gray)
-        term.write("█")
+        term.write(" ")
     end
 end
 

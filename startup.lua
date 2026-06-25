@@ -16,14 +16,6 @@ updater    = require("updater")
 ru         = require("lang.ru")
 names      = require("lib.names")
 lang       = names  -- алиас: lang.display / lang.localize (=display) доступны везде
-widgets    = require("ui.widgets")
-planner    = require("core.planner")
-storage    = require("core.storage")
-recipes    = require("core.recipes")
-machines   = require("core.machines")
-dispatcher = require("core.dispatcher")
-ui         = require("ui.ui")
-
 -- Версия (глобально, для воркеров)
 _SHELLCRAFT_VERSION = updater.localVersion()
 
@@ -59,6 +51,15 @@ local function main()
         if cfg.core_id then w:setCore(cfg.core_id) end
         w:run()
     else
+        -- Загрузка модулей сервера перед его запуском (для безопасности автообновления)
+        widgets    = require("ui.widgets")
+        planner    = require("core.planner")
+        storage    = require("core.storage")
+        recipes    = require("core.recipes")
+        machines   = require("core.machines")
+        dispatcher = require("core.dispatcher")
+        ui         = require("ui.ui")
+
         util.ok("Starting Core server...")
         server = require("core.server")
         server.run()

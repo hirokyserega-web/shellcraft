@@ -44,11 +44,20 @@ local function fetch(url)
     end
     local separator = url:find("%?") and "&" or "?"
     local busterUrl = url .. separator .. "t=" .. t
-    local r = http.get(busterUrl)
-    if not r then return nil end
-    local body = r.readAll()
-    r.close()
-    return body
+    
+    local retries = 3
+    for attempt = 1, retries do
+        local r = http.get(busterUrl)
+        if r then
+            local body = r.readAll()
+            r.close()
+            return body
+        end
+        if attempt < retries then
+            os.sleep(0.5 * attempt)
+        end
+    end
+    return nil
 end
 
 local function writeFile(path, content)

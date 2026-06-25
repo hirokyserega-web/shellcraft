@@ -50,7 +50,7 @@ function updater.localVersion()
     return (v:gsub("%s", ""))
 end
 
---- Скачать текстовый файл с URL.
+--- Скачать текстовый файл с URL (с 3 попытками и экспоненциальным бэкоффом).
 -- @return content или nil
 function updater.fetch(url)
     local t = tostring(math.random(100000, 999999))
@@ -59,11 +59,20 @@ function updater.fetch(url)
     end
     local separator = url:find("%?") and "&" or "?"
     local busterUrl = url .. separator .. "t=" .. t
-    local response = http.get(busterUrl)
-    if not response then return nil end
-    local body = response.readAll()
-    response.close()
-    return body
+    
+    local retries = 3
+    for attempt = 1, retries do
+        local response = http.get(busterUrl)
+        if response then
+            local body = response.readAll()
+            response.close()
+            return body
+        end
+        if attempt < retries then
+            os.sleep(0.5 * attempt)
+        end
+    end
+    return nil
 end
 
 --- Прочитать удалённую версию с GitHub.
@@ -140,14 +149,13 @@ function updater.update(baseUrl, force)
         end
     end
 
-    -- Обновляем локальный version
-    util.writeFile("version", remote)
-
     util.ok(string.format("Files updated: %d, errors: %d", okCount, failCount))
     if failCount == 0 then
+        -- Обновляем локальный version только если все файлы скачались успешно
+        util.writeFile("version", remote)
         return true
     end
-    return true, "partial"
+    return false, "partial update failed"
 end
 
 --- Точка входа: проверить, обновить, перезагрузить.

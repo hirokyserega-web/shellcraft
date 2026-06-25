@@ -27,6 +27,7 @@ function worker:sayHello(target)
         role = "worker",
         busy = self.crafting,
         version = _SHELLCRAFT_VERSION,
+        core = self.core_id,
     }
     if target then
         net.send(target, net.MSG.WORKER_HELLO, payload)

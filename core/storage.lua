@@ -168,4 +168,34 @@ function storage:displayName(id)
     return nil
 end
 
+--- Собрать displayName для всех уникальных предметов в хранилище
+-- и закешировать их через модуль names. Вызывается сервером один раз
+-- при старте (и периодически), чтобы UI не дёргал getItemDetail каждый кадр.
+-- @param namesModule объект names (lib/names.lua)
+function storage:collectNames(namesModule)
+    if not namesModule then return 0 end
+    local collected = 0
+    for _, name in ipairs(self.names) do
+        local p = wrap(name)
+        if p and p.list and p.getItemDetail then
+            local ok, items = pcall(p.list)
+            if ok and items then
+                for slot, info in pairs(items) do
+                    local id = info.name
+                    -- берём displayName только если ещё не в кеше и не в словаре
+                    if id and not namesModule.cache[id]
+                       and not (ru and ru.dict and ru.dict[id]) then
+                        local ok2, det = pcall(p.getItemDetail, slot)
+                        if ok2 and det and det.displayName then
+                            namesModule.cacheName(id, det.displayName)
+                            collected = collected + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return collected
+end
+
 return storage

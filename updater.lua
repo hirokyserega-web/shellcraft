@@ -23,6 +23,8 @@ updater.FILES = {
     "lang/ru.lua",
     "lib/net.lua",
     "lib/util.lua",
+    "lib/names.lua",
+    "tools/gen_lang.lua",
 }
 
 --- Файлы, которые НИКОГДА не перезаписываются при обновлении
@@ -34,6 +36,8 @@ updater.PROTECTED = {
     ["config.local.lua"] = true,
     ["shellcraft.log"] = true,
     ["lang/missing.txt"] = true,
+    ["lang/cache"] = true,
+    ["lang/missing.log"] = true,
 }
 
 --- Прочитать локальную версию.

@@ -22,12 +22,14 @@ local FILES = {
     "core/planner.lua", "core/machines.lua", "core/dispatcher.lua",
     "worker/worker.lua", "ui/ui.lua", "ui/widgets.lua",
     "lang/ru.lua", "lib/net.lua", "lib/util.lua",
+    "lib/names.lua", "tools/gen_lang.lua",
 }
 
 -- Защищённые файлы (не перезаписывать).
 local PROTECTED = {
     ["config.dat"] = true, ["recipes.dat"] = true, ["workers.dat"] = true,
-    ["config.local.lua"] = true, ["shellcraft.log"] = true, ["lang/missing.txt"] = true,
+    ["config.local.lua"] = true, ["shellcraft.log"] = true,
+    ["lang/missing.log"] = true, ["lang/cache"] = true,
 }
 
 local function ensureDir(path)

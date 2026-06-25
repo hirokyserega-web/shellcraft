@@ -47,10 +47,17 @@ function recipes:save()
 end
 
 --- Добавить/обновить рецепт.
+-- Статистику времени (avgTime, timingCount) переносим из старой версии рецепта:
+-- обновление раскладки не обнуляет накопленные замеры.
 function recipes:add(recipe)
     if not recipe or not recipe.id then return false end
+    local old = self.list[recipe.id]
     recipe.output = recipe.output or 1
     recipe.type = recipe.type or "shaped"
+    if old and old.avgTime and not recipe.avgTime then
+        recipe.avgTime = old.avgTime
+        recipe.timingCount = old.timingCount
+    end
     self.list[recipe.id] = recipe
     self:save()
     return true
@@ -223,6 +230,38 @@ function recipes:learnFromTurtle()
     local recipe = recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
     self:add(recipe)
     return true, recipe
+end
+
+----------------------------------------------------------------
+-- ВРЕМЯ КРАФТА
+----------------------------------------------------------------
+
+--- Оценка времени на 1 операцию (крафт/cycle) для рецепта.
+-- Если реальных замеров нет — возвращает дефолт по типу + approximate=true.
+-- @return secondsPerOp, approximate(bool)
+function recipes.avgTimeFor(recipe)
+    if not recipe then return 1.0, true end
+    if recipe.avgTime and recipe.avgTime > 0 then
+        return recipe.avgTime, false
+    end
+    local def = (recipe.type == "machine") and 10.0 or 1.0
+    return def, true
+end
+
+--- Обновить скользящее среднее времени на 1 операцию.
+-- @param id ID рецепта
+-- @param perOpSec время на 1 крафт/cycle (сек)
+function recipes:updateTiming(id, perOpSec)
+    local r = self.list[id]
+    if not r or not perOpSec or perOpSec <= 0 then return end
+    if not r.avgTime then
+        r.avgTime = perOpSec
+    else
+        -- экспоненциальное скользящее среднее (alpha=0.3)
+        r.avgTime = 0.3 * perOpSec + 0.7 * r.avgTime
+    end
+    r.timingCount = (r.timingCount or 0) + 1
+    self:save()
 end
 
 return recipes

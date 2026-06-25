@@ -14,7 +14,8 @@ net        = require("lib.net")
 config     = require("config")
 updater    = require("updater")
 ru         = require("lang.ru")
-lang       = ru  -- алиас: lang.localize(...)
+names      = require("lib.names")
+lang       = names  -- алиас: lang.display / lang.localize (=display) доступны везде
 widgets    = require("ui.widgets")
 planner    = require("core.planner")
 storage    = require("core.storage")
@@ -25,6 +26,9 @@ ui         = require("ui.ui")
 
 -- Версия (глобально, для воркеров)
 _SHELLCRAFT_VERSION = updater.localVersion()
+
+-- Загрузить кеш отображаемых имён и множество отсутствующих
+names.init()
 
 local function main()
     util.info("=== ShellCraft " .. _SHELLCRAFT_VERSION .. " ===")

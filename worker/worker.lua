@@ -48,12 +48,7 @@ end
 --- Отправить результат Core.
 function worker:sendResult(taskId, success, payload)
     if not self.core_id then return end
-    net.send(self.core_id, net.MSG.RESULT, {
-        task_id = taskId,
-        success = success,
-        error = not success and payload or nil,
-        count = success and payload or nil,
-    })
+    net.send(self.core_id, net.MSG.RESULT, payload)
 end
 
 --- Очистить инвентарь черепахи (вернуть всё в... никуда, просто перенести в слоты 10-16).
@@ -163,7 +158,7 @@ end
 --- Выполнить один крафт.
 -- @param recipe рецепт
 -- @param count сколько штук результата
--- @return true, сколько | false, ошибка
+-- @return true, howMany | false, ошибка
 function worker:craft(recipe, count)
     if not recipe then
         return false, "нет рецепта"
@@ -174,6 +169,8 @@ function worker:craft(recipe, count)
     local output = recipe.output or 1
     local crafts = math.ceil(count / output)
     self.crafting = true
+
+    local t0 = os.clock()
 
     -- Раскладываем
     local ok, err
@@ -190,11 +187,14 @@ function worker:craft(recipe, count)
     -- Крафтим (turtle.craft возвращает boolean, не число)
     turtle.select(1)
     local success = turtle.craft(crafts)
+    local t1 = os.clock()
     self.crafting = false
     if not success then
-        return false, "turtle.craft не удался — неверная раскладка или не хватает предметов"
+        return false, "turtle.craft вернул 0 — неверная раскладка или не хватает"
     end
-    return true, crafts * output
+    local elapsed = t1 - t0
+    if elapsed < 0 then elapsed = 0 end
+    return true, crafts * output, elapsed, crafts
 end
 
 --- Главный цикл воркера.
@@ -215,13 +215,23 @@ function worker:run()
                 self.core_id = senderId
                 util.info("Задача крафта: " .. tostring(p.recipe and p.recipe.id) .. " x" .. tostring(p.count))
                 self:sendStatus(p.task_id, 0, "начинаю")
-                local ok, res = self:craft(p.recipe, p.count)
+                local ok, res, elapsed, crafts = self:craft(p.recipe, p.count)
                 if ok then
                     self:sendStatus(p.task_id, 100, "готово")
-                    self:sendResult(p.task_id, true, res)
-                    util.ok("Готово: " .. res .. " шт")
+                    self:sendResult(p.task_id, true, {
+                        task_id = p.task_id,
+                        success = true,
+                        count = res,
+                        elapsed = elapsed,
+                        crafts = crafts,
+                    })
+                    util.ok("Готово: " .. res .. " шт за " .. string.format("%.2f", elapsed or 0) .. "с")
                 else
-                    self:sendResult(p.task_id, false, res)
+                    self:sendResult(p.task_id, false, {
+                        task_id = p.task_id,
+                        success = false,
+                        error = res,
+                    })
                     util.err("Ошибка крафта: " .. tostring(res))
                 end
             elseif msg.type == net.MSG.PING then

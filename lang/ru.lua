@@ -1,9 +1,22 @@
 -- lang/ru.lua
--- Словарь переводов item ID -> русское имя + функция локализации.
+-- Словарь переводов: item ID -> русское имя.
+--
+-- ЭТОТ ФАЙЛ АВТОСГЕНЕРИРУЕТСЯ tools/gen_lang.lua из официальных файлов
+-- перевода Minecraft (ru_ru.json). Не редактируйте вручную — перегенерируйте:
+--
+--     lua tools/gen_lang.lua ru_ru.json lang/ru.lua
+--     lua tools/gen_lang.lua vanilla/ru_ru.json create_ru.json lang/ru.lua
+--
+-- Ниже приведён базовый ванильный словарь как запасной вариант: он используется
+-- до первого запуска генератора и корректен для типовых предметов.
+-- Полнота покрытия (включая предметы модов) достигается запуском генератора
+-- с lang-файлами нужных модов.
+--
+-- Логика отображения имени (приоритеты, кеш, fallback) живёт в lib/names.lua
+-- (names.display). Здесь — ТОЛЬКО данные.
 
 local ru = {}
 
---- Основной словарь: ID -> русское название.
 ru.dict = {
     -- Дерево
     ["minecraft:oak_log"] = "Дубовое бревно",
@@ -24,10 +37,10 @@ ru.dict = {
     ["minecraft:barrel"] = "Бочка",
     ["minecraft:crafting_table"] = "Верстак",
     ["minecraft:furnace"] = "Печь",
-    ["minecraft:blast_furnace"] = "Доменная печь",
+    ["minecraft:blast_furnace"] = "Плавильная печь",
     ["minecraft:smoker"] = "Коптильня",
 
-    -- Инструменты/крафт-материалы
+    -- Слитки/материалы
     ["minecraft:iron_ingot"] = "Железный слиток",
     ["minecraft:gold_ingot"] = "Золотой слиток",
     ["minecraft:copper_ingot"] = "Медный слиток",
@@ -42,14 +55,10 @@ ru.dict = {
     ["minecraft:coal"] = "Уголь",
     ["minecraft:charcoal"] = "Древесный уголь",
     ["minecraft:redstone"] = "Редстоун",
-    ["minecraft:redstone_block"] = "Блок редстоуна",
     ["minecraft:quartz"] = "Кварц",
     ["minecraft:lapis_lazuli"] = "Лазурит",
-    ["minecraft:glowstone_dust"] = "Светокаменная пыль",
-    ["minecraft:clay_ball"] = "Глина",
     ["minecraft:brick"] = "Кирпич",
     ["minecraft:nether_brick"] = "Незерский кирпич",
-    ["minecraft:netherrack"] = "Незеррак",
     ["minecraft:obsidian"] = "Обсидиан",
     ["minecraft:glass"] = "Стекло",
     ["minecraft:paper"] = "Бумага",
@@ -65,21 +74,7 @@ ru.dict = {
     ["minecraft:bone_meal"] = "Костная мука",
     ["minecraft:slime_ball"] = "Слизь",
 
-    -- Инструменты/оружие/броня (минимально)
-    ["minecraft:wooden_pickaxe"] = "Деревянная кирка",
-    ["minecraft:stone_pickaxe"] = "Каменная кирка",
-    ["minecraft:iron_pickaxe"] = "Железная кирка",
-    ["minecraft:diamond_pickaxe"] = "Алмазная кирка",
-    ["minecraft:netherite_pickaxe"] = "Незеритовая кирка",
-    ["minecraft:wooden_sword"] = "Деревянный меч",
-    ["minecraft:stone_sword"] = "Каменный меч",
-    ["minecraft:iron_sword"] = "Железный меч",
-    ["minecraft:bow"] = "Лук",
-    ["minecraft:arrow"] = "Стрела",
-    ["minecraft:shield"] = "Щит",
-    ["minecraft:fishing_rod"] = "Удочка",
-
-    -- Блоки базовые
+    -- Базовые блоки
     ["minecraft:cobblestone"] = "Булыжник",
     ["minecraft:stone"] = "Камень",
     ["minecraft:dirt"] = "Земля",
@@ -88,12 +83,8 @@ ru.dict = {
     ["minecraft:tnt"] = "ТНТ",
     ["minecraft:torch"] = "Факел",
     ["minecraft:bookshelf"] = "Книжный шкаф",
-    ["minecraft:torch"] = "Факел",
 
-    -- Транспорт/редстоун
-    ["minecraft:minecart"] = "Вагонетка",
-    ["minecraft:rail"] = "Рельсы",
-    ["minecraft:powered_rail"] = "Электрические рельсы",
+    -- Редстоун
     ["minecraft:repeater"] = "Повторитель",
     ["minecraft:comparator"] = "Компаратор",
     ["minecraft:redstone_torch"] = "Редстоуновый факел",
@@ -104,38 +95,9 @@ ru.dict = {
     ["minecraft:dropper"] = "Выбрасыватель",
     ["minecraft:dispenser"] = "Раздатчик",
     ["minecraft:observer"] = "Наблюдатель",
+    ["minecraft:minecart"] = "Вагонетка",
+    ["minecraft:rail"] = "Рельсы",
+    ["minecraft:powered_rail"] = "Электрические рельсы",
 }
-
---- Путь к файлу лога отсутствующих переводов.
-ru.MISSING_FILE = "lang/missing.txt"
-
---- Сет уже залогированных отсутствующих ID (чтобы не дублировать).
-local loggedMissing = {}
-
---- Локализация ID предмета.
--- @param id item ID (minecraft:oak_planks)
--- @param displayName запасной displayName из getItemDetail
--- @return русское имя
-function ru.localize(id, displayName)
-    if not id then return "?" end
-    local s = tostring(id)
-    -- 1. Точный перевод
-    if ru.dict[s] then return ru.dict[s] end
-    -- 2. displayName из getItemDetail (часто уже локализован игрой/ресурс-паком)
-    if displayName and displayName ~= "" then return displayName end
-    -- 3. Красивое форматирование ID
-    local pretty = util.formatId(s)
-    -- Логируем отсутствие перевода
-    if not loggedMissing[s] then
-        loggedMissing[s] = true
-        util.ensureDir("lang")
-        local f = fs.open(ru.MISSING_FILE, "a")
-        if f then
-            f.writeLine(s)
-            f.close()
-        end
-    end
-    return pretty
-end
 
 return ru

@@ -219,6 +219,7 @@ function machines:process(recipe, count)
         return false, "нет свободной машины типа " .. tostring(recipe.machine)
     end
     emit(self, "machine_start", { name = machineName, recipe = recipe.id, count = need })
+    local t0 = os.clock()
     -- Кладём вход
     local ok, err = self:_feed(machineName, input)
     if not ok then
@@ -233,8 +234,11 @@ function machines:process(recipe, count)
     end
     -- Забираем результат
     local moved = self:_collect(machineName)
+    local t1 = os.clock()
+    local elapsed = t1 - t0
+    if elapsed < 0 then elapsed = 0 end
     emit(self, "machine_done", { name = machineName, recipe = recipe.id, count = moved })
-    return true, moved
+    return true, moved, elapsed, cycles
 end
 
 --- Проверка/перебор готовых машин (собрать результаты, что уже готовы).

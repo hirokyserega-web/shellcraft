@@ -152,4 +152,102 @@ function planner.describe(node, indent)
     return lines
 end
 
+----------------------------------------------------------------
+-- ОЦЕНКА ВРЕМЕНИ КРАФТА
+----------------------------------------------------------------
+
+--- Дефолтное время на 1 операцию (сек) если avgTime не измерен.
+planner.DEFAULT_TIME = { crafting = 1.0, machine = 10.0 }
+
+--- Время на 1 операцию для узла (через recipes.avgTimeFor).
+-- @return secondsPerOp, approximate
+local function nodeTimePerOp(n, recipes)
+    if n.recipe and recipes then
+        return recipes.avgTimeFor(n.recipe)
+    end
+    return planner.DEFAULT_TIME.crafting, true
+end
+
+--- Глубина узла от листьев (лист-базовый-ресурс = 0, корень = max).
+local function nodeLevel(n)
+    if not n or not n.has_recipe then return 0 end
+    local max = 0
+    for _, c in ipairs(n.children) do
+        local l = nodeLevel(c)
+        if l > max then max = l end
+    end
+    return max + 1
+end
+
+--- Человекочитаемая длительность.
+-- @param sec секунды
+-- @param approximate пометить как приблизительную
+function planner.formatDuration(sec, approximate)
+    local s = sec or 0
+    if s < 0 then s = 0 end
+    local str
+    if s < 60 then
+        str = string.format("%d сек", math.floor(s + 0.5))
+    elseif s < 3600 then
+        str = string.format("%.1f мин", s / 60)
+    else
+        str = string.format("%.1f ч", s / 3600)
+    end
+    str = "≈ " .. str
+    if approximate then str = str .. " (прибл.)" end
+    return str
+end
+
+--- Оценка общего времени крафта по дереву зависимостей.
+-- Независимые задачи (один уровень дерева) считаются ПАРАЛЛЕЛЬНО — общая
+-- работа уровня делится на число доступных исполнителей (воркеров+машин).
+-- Зависимые уровни суммируются последовательно (критический путь).
+-- @param node дерево из buildTree
+-- @param numWorkers число параллельных исполнителей (>=1)
+-- @param recipes объект recipes (для avgTimeFor)
+-- @return totalSec, approximate(bool), levels(массив {level,time,work,tasks,parallel})
+function planner.estimateTime(node, numWorkers, recipes)
+    numWorkers = math.max(1, numWorkers or 1)
+    -- Группируем узлы-с-рецептом по уровню.
+    local byLevel = {}
+    local function visit(n)
+        if not n or not n.has_recipe then return end
+        local lvl = nodeLevel(n)
+        if not byLevel[lvl] then byLevel[lvl] = {} end
+        byLevel[lvl][#byLevel[lvl] + 1] = n
+        for _, c in ipairs(n.children) do visit(c) end
+    end
+    visit(node)
+
+    local maxLvl = 0
+    for lvl in pairs(byLevel) do
+        if lvl > maxLvl then maxLvl = lvl end
+    end
+
+    local total = 0
+    local approximate = false
+    local levels = {}
+    -- Считаем снизу вверх: уровень 1 (ближайшие к листьям) крафтится первым.
+    for lvl = 1, maxLvl do
+        local nodes = byLevel[lvl] or {}
+        local work = 0
+        local approx = false
+        for _, n in ipairs(nodes) do
+            local perOp, ap = nodeTimePerOp(n, recipes)
+            local crafts = n.crafts or 1
+            work = work + perOp * crafts
+            if ap then approx = true end
+        end
+        local parallel = math.min(numWorkers, math.max(1, #nodes))
+        local lvlTime = work / parallel
+        total = total + lvlTime
+        if approx then approximate = true end
+        levels[#levels + 1] = {
+            level = lvl, time = lvlTime, work = work,
+            tasks = #nodes, parallel = parallel,
+        }
+    end
+    return total, approximate, levels
+end
+
 return planner

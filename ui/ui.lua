@@ -16,7 +16,7 @@ function ui.new(monitor, deps)
     self.tabs = {}
     self.tabBounds = {}
     self.state = {
-        craft    = { scroll = 0, selected = 1, mode = "list", qty = "1" },
+        craft    = { scroll = 0, selected = 1, mode = "list", qty = "1", active = nil },
         storage  = { scroll = 0, selected = 1, search = "" },
         machines = { scroll = 0, selected = 1 },
         recipes  = { scroll = 0, selected = 1, mode = "list" },
@@ -31,6 +31,26 @@ end
 function ui:addLog(msg)
     table.insert(self.log, { time = util.now(), msg = tostring(msg) })
     if #self.log > 200 then table.remove(self.log, 1) end
+end
+
+--- Шаг крафта завершён успешно (вызывается из onEvent сервера).
+function ui:taskDone()
+    local a = self.state.craft.active
+    if a then a.done = (a.done or 0) + 1 end
+end
+
+--- Шаг крафта завершён с ошибкой.
+function ui:taskFailed()
+    local a = self.state.craft.active
+    if a then a.failed = (a.failed or 0) + 1 end
+end
+
+--- Число доступных исполнителей (воркеры + машины) — для оценки параллельности.
+function ui:workersCount()
+    local n = 1
+    if self.deps.dispatcher then n = math.max(1, self.deps.dispatcher:workerCount()) end
+    if self.deps.machines then n = n + self.deps.machines:count() end
+    return n
 end
 
 --- Сгенерировать список вкладок (динамически).
@@ -131,12 +151,40 @@ function ui:render()
     elseif tab == "log" then self:renderLog(3, h - 1, w)
     end
 
-    -- Подвал
+    -- Подвал: прогресс активного крафта ИЛИ подсказка
     term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.lightGray)
+    term.clearLine()  -- на строке h
     term.setCursorPos(1, h)
-    term.clearLine()
-    term.write(self:footerHint())
+    local a = self.state.craft.active
+    if a and (a.done + a.failed) < a.total then
+        local completed = a.done + a.failed
+        local pct = a.total > 0 and math.floor(completed / a.total * 100) or 0
+        -- ETA: пока нет завершённых — берём начальную оценку, потом уточняем по факту
+        local now = os.epoch("utc")
+        local elapsed = (now - (a.started or now)) / 1000
+        local eta
+        if completed > 0 then
+            eta = (elapsed / completed) * (a.total - completed)
+        else
+            eta = a.etaTotal or 0
+        end
+        -- текстовая полоса прогресса
+        local etaStr = planner.formatDuration(eta)
+        local rightLen = #etaStr + 10
+        local barLen = math.max(8, w - rightLen)
+        local filled = math.floor(barLen * completed / math.max(1, a.total))
+        local bar = string.rep("█", filled) .. string.rep("░", barLen - filled)
+        term.setTextColor(colors.green)
+        term.write(bar)
+        term.setTextColor(colors.lightGray)
+        term.write(string.format(" %3d%% ETA %s", pct, etaStr))
+    else
+        if a and (a.done + a.failed) >= a.total then
+            self.state.craft.active = nil
+        end
+        term.setTextColor(colors.lightGray)
+        term.write(self:footerHint())
+    end
 
     term.redirect(old)
 end
@@ -171,10 +219,14 @@ function ui:renderCraft(yTop, yBot, w)
         -- Список рецептов
         local items = {}
         for _, r in ipairs(list) do
-            local name = self.deps.lang.localize(r.id)
+            local name = self.deps.lang.display(r.id, r.name)
             local have = self.deps.storage:count(r.id)
             local type = r.type == "machine" and " [М]" or ""
-            table.insert(items, string.format("%-22s x%-3d%s есть:%d", name:sub(1, 22), r.output or 1, type, have))
+            local tStr = ""
+            if r.avgTime then
+                tStr = string.format(" ~%.0fs", r.avgTime * (r.crafts or 1))
+            end
+            table.insert(items, string.format("%-22s x%-3d%s есть:%d%s", name:sub(1, 22), r.output or 1, type, have, tStr))
         end
         local h = yBot - yTop + 1
         widgets.list(1, yTop, w, h, items, st.scroll, st.selected)
@@ -187,18 +239,20 @@ function ui:renderCraft(yTop, yBot, w)
         local r = list[st.selected]
         if not r then st.mode = "list"; return end
         widgets.box(2, yTop, w - 4, yBot - yTop + 1, "Заказ крафта", "double")
-        local name = self.deps.lang.localize(r.id)
+        local name = self.deps.lang.display(r.id, r.name)
         widgets.text(4, yTop + 2, "Предмет: " .. name, colors.white)
         widgets.text(4, yTop + 3, string.format("Выход за крафт: %d", r.output or 1), colors.lightGray)
         local inStore = self.deps.storage:count(r.id)
         widgets.text(4, yTop + 4, "В хранилище: " .. inStore, colors.lightGray)
         -- Количество
         widgets.center(yTop + 6, "Количество: " .. st.qty, colors.yellow, colors.black)
-        -- Калькулятор потребности
+        -- Калькулятор потребности + оценка времени
         local qty = tonumber(st.qty) or 0
         if qty > 0 then
             local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage)
             local bom = planner.calculateBOM(tree)
+            local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
+            widgets.text(4, yTop + 5, "Оценка: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green)
             local y = yTop + 8
             widgets.text(4, y, "Потребуется:", colors.cyan); y = y + 1
             local any = false
@@ -207,7 +261,7 @@ function ui:renderCraft(yTop, yBot, w)
                     local have = self.deps.storage:count(info.id)
                     local col = have >= info.count and colors.green or colors.red
                     widgets.text(5, y, string.format("  %-20s надо:%d есть:%d",
-                        self.deps.lang.localize(info.id):sub(1, 20), info.count, have), col)
+                        self.deps.lang.display(info.id):sub(1, 20), info.count, have), col)
                     y = y + 1
                     any = true
                 end
@@ -227,9 +281,15 @@ function ui:renderCraft(yTop, yBot, w)
         self:button(w - 18, yBot - 1, 7, " ОК ", true, function()
             local n = tonumber(st.qty) or 0
             if n > 0 then
+                local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
+                local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
                 local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
                 if ids then
-                    self:addLog("Заказ: " .. name .. " x" .. n .. " (" .. #ids .. " шагов)")
+                    self:addLog("Заказ: " .. name .. " x" .. n .. " (" .. #ids .. " шагов, " .. planner.formatDuration(estTime, approx) .. ")")
+                    self.state.craft.active = {
+                        total = #ids, done = 0, failed = 0,
+                        etaTotal = estTime, started = os.epoch("utc"),
+                    }
                 else
                     self:addLog("Ошибка заказа: " .. tostring(err))
                 end
@@ -254,7 +314,7 @@ function ui:renderStorage(yTop, yBot, w)
     -- Фильтрация
     local filtered = {}
     for _, it in ipairs(items) do
-        local name = self.deps.lang.localize(it.id):lower()
+        local name = self.deps.lang.display(it.id):lower()
         if search == "" or name:find(search, 1, true) or it.id:lower():find(search, 1, true) then
             table.insert(filtered, it)
         end
@@ -262,7 +322,7 @@ function ui:renderStorage(yTop, yBot, w)
     local h = yBot - yTop + 1 - 1  -- минус строка поиска
     local rows = {}
     for _, it in ipairs(filtered) do
-        local name = self.deps.lang.localize(it.id)
+        local name = self.deps.lang.display(it.id)
         table.insert(rows, string.format("%-26s x%d", name:sub(1, 26), it.count))
     end
     if #rows == 0 then
@@ -289,7 +349,7 @@ function ui:renderMachines(yTop, yBot, w)
     for _, name in ipairs(mach.names) do
         local info = mach:status(name)
         local busy = info.busy and "ЗАНЯТ" or "СВОБ"
-        local what = info.cooking and (" (" .. self.deps.lang.localize(info.cooking) .. ")") or ""
+        local what = info.cooking and (" (" .. self.deps.lang.display(info.cooking) .. ")") or ""
         table.insert(rows, string.format("%-20s %-6s%s", name:sub(1, 20), busy, what))
     end
     widgets.list(1, yTop, w, h, rows, st.scroll, st.selected)
@@ -308,7 +368,7 @@ function ui:renderRecipes(yTop, yBot, w)
     local h = yBot - yTop + 1
     local rows = {}
     for _, r in ipairs(list) do
-        local name = self.deps.lang.localize(r.id)
+        local name = self.deps.lang.display(r.id, r.name)
         local type = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
         table.insert(rows, string.format("[%s] %-24s x%d", type, name:sub(1, 24), r.output or 1))
     end
@@ -325,7 +385,7 @@ function ui:renderRecipes(yTop, yBot, w)
     self:button(20, yBot - 1, 14, " - Удалить ", false, function()
         if list[st.selected] then
             recipes:remove(list[st.selected].id)
-            self:addLog("Удалён рецепт: " .. self.deps.lang.localize(list[st.selected].id))
+            self:addLog("Удалён рецепт: " .. self.deps.lang.display(list[st.selected].id))
         end
     end, { bg = colors.red })
     if st.mode == "learn" then
@@ -333,7 +393,7 @@ function ui:renderRecipes(yTop, yBot, w)
         self:button(w - 16, yTop, 7, " Готово ", true, function()
             local ok, recipe = recipes:learnFromTurtle()
             if ok then
-                self:addLog("Сохранён рецепт: " .. self.deps.lang.localize(recipe.id))
+                self:addLog("Сохранён рецепт: " .. self.deps.lang.display(recipe.id))
             else
                 self:addLog("Ошибка обучения: " .. tostring(recipe))
             end

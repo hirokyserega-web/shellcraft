@@ -101,6 +101,13 @@ function dispatcher:freeCount()
     return n
 end
 
+--- Полное число зарегистрированных воркеров (для оценки параллельности).
+function dispatcher:workerCount()
+    local n = 0
+    for _ in pairs(self.workers) do n = n + 1 end
+    return n
+end
+
 function dispatcher:findFree()
     for id, w in pairs(self.workers) do
         if w.state == "free" then return id, w end
@@ -188,8 +195,12 @@ function dispatcher:tick()
         task.status = "running"
         task.worker_id = "machine"
         emit(self, "task_started", { id = task.id, worker = "machine", recipe = task.recipe.id })
-        local ok, res = self.machines:process(task.recipe, task.count)
+        local ok, res, elapsed, cycles = self.machines:process(task.recipe, task.count)
         if ok then
+            -- Обновляем avgTime рецепта (время на 1 цикл машины)
+            if self.recipes and elapsed and cycles and cycles > 0 then
+                self.recipes:updateTiming(task.recipe.id, elapsed / cycles)
+            end
             task.status = "done"
             task.result = { success = true, count = res }
             emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = res })
@@ -252,6 +263,10 @@ function dispatcher:handleMessage(senderId, msg)
                 self:collectResult(senderId)
                 task.status = "done"
                 task.result = p
+                -- Обновляем avgTime рецепта (время на 1 крафт черепахи)
+                if self.recipes and p.elapsed and p.crafts and p.crafts > 0 then
+                    self.recipes:updateTiming(task.recipe.id, p.elapsed / p.crafts)
+                end
                 emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = p.count })
             else
                 -- При ошибке тоже забираем остатки

@@ -8,7 +8,10 @@ storage.cache
 *.tmp
 
 # Логи отсутствующих переводов
-lang/missing.txt
+lang/missing.log
+
+# Кеш отображаемых имён (собирается из getItemDetail)
+lang/cache
 
 # CraftOS-PC / IDE
 *.meta

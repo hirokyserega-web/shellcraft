@@ -52,6 +52,10 @@ local function isInventory(name)
     if not ok then return false end
     local p = peripheral.wrap(name)
     if not p then return false end
+    local ptype = peripheral.getType(name)
+    if ptype == "create:item_vault" or ptype == "item_vault" then
+        return true
+    end
     return type(p.list) == "function" and type(p.size) == "function"
 end
 

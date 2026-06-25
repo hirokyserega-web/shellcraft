@@ -95,10 +95,20 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
     for _, loc in ipairs(info.locations) do
         if remaining <= 0 then break end
         local p = wrap(loc.p)
-        if p and p.pushItems then
+        if p then
             local toMove = math.min(remaining, loc.qty)
-            local ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, targetSlot)
-            if ok and n then
+            local ok, n = false, 0
+            if p.pushItems then
+                ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, targetSlot)
+            end
+            if not ok or not n or n == 0 then
+                -- Fallback: pull from target peripheral
+                local target = wrap(targetPeripheral)
+                if target and target.pullItems then
+                    ok, n = pcall(target.pullItems, loc.p, loc.s, toMove, targetSlot)
+                end
+            end
+            if ok and n and n > 0 then
                 moved = moved + n
                 remaining = remaining - n
                 loc.qty = loc.qty - n
@@ -128,9 +138,17 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
         for _, loc in ipairs(self.cache[id].locations) do
             if toMove <= 0 then break end
             local p = wrap(loc.p)
-            if p and p.pullItems then
-                -- Try to pull into the existing slot to stack
-                local ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
+            if p then
+                local ok2, n = false, 0
+                if p.pullItems then
+                    ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
+                end
+                if not ok2 or not n or n == 0 then
+                    -- Fallback: push from source peripheral
+                    if src.pushItems then
+                        ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
+                    end
+                end
                 if ok2 and n and n > 0 then
                     moved = moved + n
                     toMove = toMove - n
@@ -152,7 +170,16 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
                     if toMove <= 0 then break end
                     if not list[s] then
                         -- This slot is empty
-                        local ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, s)
+                        local ok2, n = false, 0
+                        if p.pullItems then
+                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, s)
+                        end
+                        if not ok2 or not n or n == 0 then
+                            -- Fallback: push from source peripheral
+                            if src.pushItems then
+                                ok2, n = pcall(src.pushItems, name, sourceSlot, toMove, s)
+                            end
+                        end
                         if ok2 and n and n > 0 then
                             moved = moved + n
                             toMove = toMove - n

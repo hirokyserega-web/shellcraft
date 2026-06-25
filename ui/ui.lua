@@ -1024,7 +1024,6 @@ function ui:renderRecipes(yTop, yBot, w)
         end, { bg = colors.red })
     end
 end
-end
 
 ----------------------------------------------------------------
 -- Вкладка ЛОГ

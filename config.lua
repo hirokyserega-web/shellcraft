@@ -17,6 +17,7 @@ config.defaults = {
     heartbeat_interval = 10,
     use_russian_names = false, -- Requires a Cyrillic font resource pack or transliteration
     text_scale = 0.5,          -- Text scale for monitor (e.g. 1.0 or 0.5)
+    grid_chest = nil,          -- default storage grid chest for recording recipes
     -- Ручное переопределение периферии (пусто = автоопределение)
     peripherals = {
         storage   = {},        -- список имён chest/barrel

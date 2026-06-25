@@ -15,12 +15,14 @@ function ui.new(monitor, deps)
     self.activeTab = "craft"
     self.tabs = {}
     self.tabBounds = {}
+    self.configData = config.load()
     self.state = {
         craft    = { scroll = 0, selected = 1, mode = "list", qty = "1", active = nil },
         storage  = { scroll = 0, selected = 1, search = "" },
         machines = { scroll = 0, selected = 1 },
         recipes  = { scroll = 0, selected = 1, mode = "list" },
         log      = { scroll = 0 },
+        settings = { scroll = 0, selected = 1 },
     }
     self.log = {}
     self.buttons = {}  -- кнопки текущего экрана для hit-test {rect=, action=}
@@ -64,6 +66,7 @@ function ui:buildTabs()
     end
     table.insert(self.tabs, { id = "recipes", title = "Recipes" })
     table.insert(self.tabs, { id = "log",     title = "Log" })
+    table.insert(self.tabs, { id = "settings", title = "Set." })
 end
 
 --- Переключиться на вкладку (если существует).
@@ -163,6 +166,7 @@ function ui:render()
     elseif tab == "machines" then self:renderMachines(4, h - 1, w)
     elseif tab == "recipes" then self:renderRecipes(4, h - 1, w)
     elseif tab == "log" then self:renderLog(4, h - 1, w)
+    elseif tab == "settings" then self:renderSettings(4, h - 1, w)
     end
 
     -- Подвал: прогресс активного крафта ИЛИ подсказка
@@ -214,6 +218,7 @@ function ui:footerHint()
     elseif tab == "machines" then return "Tap - refresh status."
     elseif tab == "recipes" then return "Tap - select. [+Record] - new recipe."
     elseif tab == "log" then return "Scroll by tapping edges."
+    elseif tab == "settings" then return "Tap chest to set default grid. X - exit."
     end
     return ""
 end
@@ -548,176 +553,477 @@ end
 ----------------------------------------------------------------
 -- Вкладка РЕЦЕПТЫ
 ----------------------------------------------------------------
+----------------------------------------------------------------
+-- Вкладка РЕЦЕПТЫ
+----------------------------------------------------------------
+function ui:startWizard()
+    local st = self.state.recipes
+    st.mode = "learn_select"
+    st.wizardStep = 1
+    st.learnType = 1
+    st.wizardScroll = 0
+    st.wizardSelected = 1
+    
+    -- Предустановка сундука по умолчанию, если он задан в настройках
+    if self.configData.grid_chest then
+        st.tempStorage = self.configData.grid_chest
+        local list = {}
+        for _, name in ipairs(peripheral.getNames()) do
+            local ok, p = pcall(peripheral.wrap, name)
+            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                local isMach = false
+                if self.deps.machines then
+                    for _, mn in ipairs(self.deps.machines.names) do
+                        if mn == name then isMach = true; break end
+                    end
+                end
+                if not isMach then table.insert(list, name) end
+            end
+        end
+        local idx = 1
+        for i, name in ipairs(list) do
+            if name == st.tempStorage then idx = i; break end
+        end
+        st.wizardSelected = idx
+    else
+        st.tempStorage = nil
+    end
+    st.tempMachine = nil
+    st.tempWorker = nil
+end
+
+function ui:wizardNext(wRows)
+    local st = self.state.recipes
+    local recipes = self.deps.recipes
+    local selectedVal = wRows[st.wizardSelected or 1]
+    local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
+    if not selectedVal and not isLastStep then return end
+    
+    if st.wizardStep == 1 then
+        st.learnType = st.wizardSelected or 1
+        st.wizardStep = 2
+        
+        -- Попытка предвыбора сундука
+        local currentGrid = self.configData.grid_chest
+        local list = {}
+        for _, name in ipairs(peripheral.getNames()) do
+            local ok, p = pcall(peripheral.wrap, name)
+            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                local isMach = false
+                if self.deps.machines then
+                    for _, mn in ipairs(self.deps.machines.names) do
+                        if mn == name then isMach = true; break end
+                    end
+                end
+                if not isMach then table.insert(list, name) end
+            end
+        end
+        local index = 1
+        if currentGrid then
+            for i, name in ipairs(list) do
+                if name == currentGrid then index = i; break end
+            end
+        end
+        st.wizardSelected = index
+        st.wizardScroll = 0
+    elseif st.wizardStep == 2 then
+        st.tempStorage = selectedVal
+        if st.learnType == 1 then
+            local ok, recipe = recipes:learnFromStorage(selectedVal)
+            if ok then
+                self:addLog("Saved: " .. self.deps.lang.display(recipe.id))
+            else
+                self:addLog("Error: " .. tostring(recipe))
+            end
+            st.mode = "list"
+        else
+            st.wizardStep = 3
+            st.wizardSelected = 1
+            st.wizardScroll = 0
+        end
+    elseif st.wizardStep == 3 then
+        if st.learnType == 2 then
+            st.tempMachine = selectedVal
+            self:addLog("Smelting processing...")
+            local ok, recipe = recipes:activeLearnMachine(st.tempStorage, selectedVal)
+            if ok then
+                self:addLog("Smelt Saved: " .. self.deps.lang.display(recipe.id))
+            else
+                self:addLog("Smelt Error: " .. tostring(recipe))
+            end
+        elseif st.learnType == 3 then
+            local workerId = tonumber(selectedVal:match("#(%d+)"))
+            if workerId then
+                self:addLog("Crafting turtle...")
+                local ok, recipe = recipes:activeLearnCraft(st.tempStorage, workerId, self.deps.dispatcher)
+                if ok then
+                    self:addLog("Craft Saved: " .. self.deps.lang.display(recipe.id))
+                else
+                    self:addLog("Craft Error: " .. tostring(recipe))
+                end
+            else
+                self:addLog("Invalid worker selected")
+            end
+        end
+        st.mode = "list"
+    end
+end
+
 function ui:renderRecipes(yTop, yBot, w)
     local st = self.state.recipes
     local recipes = self.deps.recipes
     local list = recipes:all()
     local h = yBot - yTop + 1
     
-    if st.mode == "learn_select" then
-        term.setTextColor(colors.cyan)
-        local titles = {
-            [1] = "1/3 Choose Mode",
-            [2] = "2/3 Choose Grid Chest",
-            [3] = (st.learnType == 2) and "3/3 Choose Machine" or "3/3 Choose Worker"
-        }
-        widgets.box(2, yTop, w - 2, yBot - yTop + 1, titles[st.wizardStep or 1], "double")
+    local isSplit = (w >= 34)
+    
+    if isSplit then
+        local wLeft = math.floor(w * 0.45)
+        if wLeft < 15 then wLeft = 15 end
+        local wRight = w - wLeft - 1
+        local startX = wLeft + 2
         
-        local helpTexts = {
-            [1] = "Select recording method:",
-            [2] = "Select chest used as grid:",
-            [3] = (st.learnType == 2) and "Select furnace machine:" or "Select worker turtle:"
-        }
-        widgets.text(3, yTop + 1, helpTexts[st.wizardStep or 1], colors.lightGray, colors.black)
-        
+        ------------------------------------------------------------
+        -- LEFT COLUMN: Recipe list
+        ------------------------------------------------------------
         local rows = {}
-        if st.wizardStep == 1 then
-            rows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
-        elseif st.wizardStep == 2 then
-            for _, name in ipairs(peripheral.getNames()) do
-                local ok, p = pcall(peripheral.wrap, name)
-                if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                    local isMach = false
-                    if self.deps.machines then
-                        for _, mn in ipairs(self.deps.machines.names) do
-                            if mn == name then isMach = true; break end
-                        end
-                    end
-                    if not isMach then
-                        table.insert(rows, name)
-                    end
-                end
-            end
-        elseif st.wizardStep == 3 then
-            if st.learnType == 2 then
-                if self.deps.machines then
-                    for _, name in ipairs(self.deps.machines.names) do
-                        table.insert(rows, name)
-                    end
-                end
-            elseif st.learnType == 3 then
-                if self.deps.dispatcher then
-                    local wList = self.deps.dispatcher:workerList()
-                    for _, workerInfo in ipairs(wList) do
-                        table.insert(rows, "Worker #" .. workerInfo.id)
-                    end
+        for _, r in ipairs(list) do
+            local name = self.deps.lang.display(r.id, r.name)
+            local type = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
+            table.insert(rows, string.format("[%s] %s", type, name):sub(1, wLeft))
+        end
+        
+        local listH = h - 1
+        if #rows == 0 then
+            widgets.clearArea(1, yTop, wLeft, listH)
+            widgets.center(math.floor((yTop + yBot - 1) / 2), "No recipes", colors.gray)
+        else
+            widgets.list(1, yTop, wLeft, listH, rows, st.scroll, st.selected)
+        end
+        
+        -- Delete & Scroll controls at row yBot of left pane
+        local deleteAction = function()
+            local r = list[st.selected]
+            if r then
+                recipes:remove(r.id)
+                self:addLog("Deleted: " .. self.deps.lang.display(r.id))
+                if st.selected > #recipes:all() then
+                    st.selected = math.max(1, #recipes:all())
                 end
             end
         end
+        self:button(1, yBot, 8, "-Delete", false, deleteAction, { bg = colors.red })
+        self:button(wLeft - 6, yBot, 3, "▲", false, function()
+            st.scroll = math.max(0, st.scroll - (listH - 2))
+        end)
+        self:button(wLeft - 2, yBot, 3, "▼", false, function()
+            if st.scroll + listH < #rows then
+                st.scroll = st.scroll + (listH - 2)
+            end
+        end)
         
-        local listH = yBot - yTop + 1 - 4
-        widgets.list(3, yTop + 2, w - 4, listH, rows, st.wizardScroll or 0, st.wizardSelected or 1)
-        
-        if #rows > listH then
-            self:button(w - 7, yTop + 2, 4, "Up", false, function()
-                st.wizardScroll = math.max(0, (st.wizardScroll or 0) - 1)
-            end)
-            self:button(w - 7, yBot - 2, 4, "Dn", false, function()
-                if (st.wizardScroll or 0) + listH < #rows then
-                    st.wizardScroll = (st.wizardScroll or 0) + 1
-                end
-            end)
+        ------------------------------------------------------------
+        -- VERTICAL SEPARATOR
+        ------------------------------------------------------------
+        for y = yTop, yBot do
+            term.setCursorPos(wLeft + 1, y)
+            term.setTextColor(colors.gray)
+            term.setBackgroundColor(colors.black)
+            term.write("|")
         end
         
-        local btnW = 8
-        local startX = math.floor((w - (btnW * 3 + 2)) / 2) + 1
-        
-        if st.wizardStep > 1 then
-            self:button(startX, yBot - 1, btnW, "Back", false, function()
-                st.wizardStep = st.wizardStep - 1
-                st.wizardSelected = 1
-                st.wizardScroll = 0
-            end, { bg = colors.gray })
-        end
-        
-        self:button(startX + btnW + 1, yBot - 1, btnW, "Cancel", false, function()
-            st.mode = "list"
-        end, { bg = colors.red })
-        
-        local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
-        local btnLabel = isLastStep and "Record" or "Next"
-        self:button(startX + (btnW + 1) * 2, yBot - 1, btnW, btnLabel, true, function()
-            local selectedVal = rows[st.wizardSelected or 1]
-            if not selectedVal and not isLastStep then return end
+        ------------------------------------------------------------
+        -- RIGHT COLUMN: Recipe detail / wizard
+        ------------------------------------------------------------
+        if st.mode == "learn_select" then
+            term.setTextColor(colors.cyan)
+            local titles = {
+                [1] = "1/3 Mode",
+                [2] = "2/3 Grid Chest",
+                [3] = (st.learnType == 2) and "3/3 Machine" or "3/3 Worker"
+            }
+            widgets.text(startX, yTop, titles[st.wizardStep or 1], colors.cyan, colors.black)
             
+            local helpTexts = {
+                [1] = "Select method:",
+                [2] = "Select grid chest:",
+                [3] = (st.learnType == 2) and "Select machine:" or "Select worker:"
+            }
+            widgets.text(startX, yTop + 1, helpTexts[st.wizardStep or 1], colors.lightGray, colors.black)
+            
+            local wRows = {}
             if st.wizardStep == 1 then
-                st.learnType = st.wizardSelected or 1
-                st.wizardStep = 2
-                st.wizardSelected = 1
-                st.wizardScroll = 0
+                wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
             elseif st.wizardStep == 2 then
-                st.tempStorage = selectedVal
-                if st.learnType == 1 then
-                    local ok, recipe = recipes:learnFromStorage(selectedVal)
-                    if ok then
-                        self:addLog("Saved: " .. self.deps.lang.display(recipe.id))
-                    else
-                        self:addLog("Error: " .. tostring(recipe))
+                for _, name in ipairs(peripheral.getNames()) do
+                    local ok, p = pcall(peripheral.wrap, name)
+                    if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                        local isMach = false
+                        if self.deps.machines then
+                            for _, mn in ipairs(self.deps.machines.names) do
+                                if mn == name then isMach = true; break end
+                            end
+                        end
+                        if not isMach then table.insert(wRows, name) end
                     end
-                    st.mode = "list"
-                else
-                    st.wizardStep = 3
-                    st.wizardSelected = 1
-                    st.wizardScroll = 0
                 end
             elseif st.wizardStep == 3 then
                 if st.learnType == 2 then
-                    st.tempMachine = selectedVal
-                    self:addLog("Processing smelting...")
-                    local ok, recipe = recipes:activeLearnMachine(st.tempStorage, selectedVal)
-                    if ok then
-                        self:addLog("Smelt Saved: " .. self.deps.lang.display(recipe.id))
-                    else
-                        self:addLog("Smelt Error: " .. tostring(recipe))
+                    if self.deps.machines then
+                        for _, name in ipairs(self.deps.machines.names) do
+                            table.insert(wRows, name)
+                        end
                     end
                 elseif st.learnType == 3 then
-                    local workerId = tonumber(selectedVal:match("#(%d+)"))
-                    if workerId then
-                        self:addLog("Executing craft on turtle...")
-                        local ok, recipe = recipes:activeLearnCraft(st.tempStorage, workerId, self.deps.dispatcher)
-                        if ok then
-                            self:addLog("Craft Saved: " .. self.deps.lang.display(recipe.id))
-                        else
-                            self:addLog("Craft Error: " .. tostring(recipe))
+                    if self.deps.dispatcher then
+                        local wList = self.deps.dispatcher:workerList()
+                        for _, workerInfo in ipairs(wList) do
+                            table.insert(wRows, "Worker #" .. workerInfo.id)
                         end
-                    else
-                        self:addLog("Invalid worker selected")
                     end
                 end
-                st.mode = "list"
             end
-        end, { bgActive = colors.green })
-        return
-    end
-
-    local rows = {}
-    for _, r in ipairs(list) do
-        local name = self.deps.lang.display(r.id, r.name)
-        local type = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
-        table.insert(rows, string.format("[%s] %-24s x%d", type, name:sub(1, 24), r.output or 1))
-    end
-    if #rows == 0 then
-        widgets.center(yTop + 1, "No recipes", colors.gray)
-    else
-        widgets.list(1, yTop, w, h - 2, rows, st.scroll, st.selected)
-    end
-    -- Кнопки внизу
-    self:button(2, yBot - 1, 16, " + Record ", false, function()
-        st.mode = "learn_select"
-        st.wizardStep = 1
-        st.learnType = 1
-        st.tempStorage = nil
-        st.tempMachine = nil
-        st.tempWorker = nil
-        st.wizardScroll = 0
-        st.wizardSelected = 1
-    end, { bgActive = colors.green })
-    self:button(20, yBot - 1, 14, " - Delete ", false, function()
-        if list[st.selected] then
-            recipes:remove(list[st.selected].id)
-            self:addLog("Deleted recipe: " .. self.deps.lang.display(list[st.selected].id))
+            
+            local wListH = h - 3
+            widgets.list(startX, yTop + 2, wRight, wListH, wRows, st.wizardScroll or 0, st.wizardSelected or 1)
+            
+            if #wRows > wListH then
+                self:button(w - 7, yTop + 2, 3, "▲", false, function()
+                    st.wizardScroll = math.max(0, (st.wizardScroll or 0) - 1)
+                end)
+                self:button(w - 7, yBot - 1, 3, "▼", false, function()
+                    if (st.wizardScroll or 0) + wListH < #wRows then
+                        st.wizardScroll = (st.wizardScroll or 0) + 1
+                    end
+                end)
+            end
+            
+            local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
+            local btnLabel = isLastStep and "Record" or "Next"
+            
+            if st.wizardStep > 1 then
+                self:button(startX, yBot, 4, "Back", false, function()
+                    st.wizardStep = st.wizardStep - 1
+                    st.wizardSelected = 1
+                    st.wizardScroll = 0
+                end, { bg = colors.gray })
+                self:button(startX + 5, yBot, 6, "Cancel", false, function()
+                    st.mode = "list"
+                end, { bg = colors.red })
+                self:button(startX + 12, yBot, 6, btnLabel, true, function()
+                    self:wizardNext(wRows)
+                end, { bgActive = colors.green })
+            else
+                self:button(startX, yBot, 8, "Cancel", false, function()
+                    st.mode = "list"
+                end, { bg = colors.red })
+                self:button(startX + 10, yBot, 8, "Next", true, function()
+                    self:wizardNext(wRows)
+                end, { bgActive = colors.green })
+            end
+            
+        else
+            local r = list[st.selected]
+            if r then
+                widgets.text(startX, yTop, "Name: " .. self.deps.lang.display(r.id):sub(1, wRight - 6), colors.yellow, colors.black)
+                local tName = r.type == "shaped" and "Shaped" or (r.type == "shapeless" and "Shapeless" or "Machine")
+                widgets.text(startX, yTop + 1, string.format("Type: %s  x%d", tName, r.output or 1), colors.lightGray, colors.black)
+                
+                if r.type == "shaped" then
+                    local unique = {}
+                    local letters = {"A", "B", "C", "D", "E", "F", "G", "H", "I"}
+                    local mapping = {}
+                    for row = 1, 3 do
+                        local rPattern = r.pattern and r.pattern[row]
+                        if rPattern then
+                            for col = 1, 3 do
+                                local cell = rPattern[col]
+                                local cellId = cell and cell.id
+                                if cellId then
+                                    if not mapping[cellId] then
+                                        local letter = letters[#unique + 1] or "?"
+                                        mapping[cellId] = letter
+                                        table.insert(unique, { id = cellId, letter = letter })
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    for row = 1, 3 do
+                        local rPattern = r.pattern and r.pattern[row]
+                        local line = ""
+                        for col = 1, 3 do
+                            local cell = rPattern and rPattern[col]
+                            local cellId = cell and cell.id
+                            if cellId then
+                                line = line .. "[" .. mapping[cellId] .. "]"
+                            else
+                                line = line .. "[ ]"
+                            end
+                        end
+                        widgets.text(startX, yTop + 1 + row, line, colors.cyan, colors.black)
+                    end
+                    local curY = yTop + 5
+                    for idx, itemInfo in ipairs(unique) do
+                        if curY < yBot then
+                            local disp = self.deps.lang.display(itemInfo.id):sub(1, wRight - 3)
+                            widgets.text(startX, curY, itemInfo.letter .. ":" .. disp, colors.white, colors.black)
+                            curY = curY + 1
+                        end
+                    end
+                elseif r.type == "machine" then
+                    widgets.text(startX, yTop + 3, "Machine: " .. tostring(r.machine):sub(1, wRight), colors.cyan, colors.black)
+                    if r.input and r.input[1] then
+                        local inp = r.input[1]
+                        widgets.text(startX, yTop + 4, "Input: " .. self.deps.lang.display(inp.id):sub(1, wRight), colors.white, colors.black)
+                        widgets.text(startX, yTop + 5, "Count: " .. (inp.count or 1), colors.white, colors.black)
+                    end
+                elseif r.type == "shapeless" then
+                    widgets.text(startX, yTop + 3, "Ingredients:", colors.cyan, colors.black)
+                    local curY = yTop + 4
+                    if r.ingredients then
+                        for _, ing in ipairs(r.ingredients) do
+                            if curY < yBot then
+                                local name = self.deps.lang.display(ing.id or ing)
+                                widgets.text(startX, curY, string.format(" - %dx %s", ing.count or 1, name):sub(1, wRight), colors.white, colors.black)
+                                curY = curY + 1
+                            end
+                        end
+                    end
+                end
+                
+                self:button(startX, yBot, 8, " + New ", false, function()
+                    self:startWizard()
+                end, { bgActive = colors.green })
+                self:button(startX + 10, yBot, 9, "Rewrite", false, function()
+                    self:startWizard()
+                end)
+            else
+                widgets.clearArea(startX, yTop, wRight, h)
+                widgets.center(math.floor((yTop + yBot) / 2) + wLeft + 1, "Select recipe", colors.gray)
+                self:button(startX, yBot, 10, " + Record ", false, function()
+                    self:startWizard()
+                end, { bgActive = colors.green })
+            end
         end
-    end, { bg = colors.red })
+        
+    else
+        -- FALLBACK SINGLE-PANE LAYOUT (w < 34)
+        if st.mode == "learn_select" then
+            term.setTextColor(colors.cyan)
+            local titles = {
+                [1] = "1/3 Choose Mode",
+                [2] = "2/3 Choose Grid Chest",
+                [3] = (st.learnType == 2) and "3/3 Choose Machine" or "3/3 Choose Worker"
+            }
+            widgets.box(2, yTop, w - 2, yBot - yTop + 1, titles[st.wizardStep or 1], "double")
+            
+            local helpTexts = {
+                [1] = "Select recording method:",
+                [2] = "Select chest used as grid:",
+                [3] = (st.learnType == 2) and "Select furnace machine:" or "Select worker turtle:"
+            }
+            widgets.text(3, yTop + 1, helpTexts[st.wizardStep or 1], colors.lightGray, colors.black)
+            
+            local wRows = {}
+            if st.wizardStep == 1 then
+                wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
+            elseif st.wizardStep == 2 then
+                for _, name in ipairs(peripheral.getNames()) do
+                    local ok, p = pcall(peripheral.wrap, name)
+                    if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                        local isMach = false
+                        if self.deps.machines then
+                            for _, mn in ipairs(self.deps.machines.names) do
+                                if mn == name then isMach = true; break end
+                            end
+                        end
+                        if not isMach then table.insert(wRows, name) end
+                    end
+                end
+            elseif st.wizardStep == 3 then
+                if st.learnType == 2 then
+                    if self.deps.machines then
+                        for _, name in ipairs(self.deps.machines.names) do
+                            table.insert(wRows, name)
+                        end
+                    end
+                elseif st.learnType == 3 then
+                    if self.deps.dispatcher then
+                        local wList = self.deps.dispatcher:workerList()
+                        for _, workerInfo in ipairs(wList) do
+                            table.insert(wRows, "Worker #" .. workerInfo.id)
+                        end
+                    end
+                end
+            end
+            
+            local listH = yBot - yTop + 1 - 4
+            widgets.list(3, yTop + 2, w - 4, listH, wRows, st.wizardScroll or 0, st.wizardSelected or 1)
+            
+            if #wRows > listH then
+                self:button(w - 7, yTop + 2, 4, "Up", false, function()
+                    st.wizardScroll = math.max(0, (st.wizardScroll or 0) - 1)
+                end)
+                self:button(w - 7, yBot - 2, 4, "Dn", false, function()
+                    if (st.wizardScroll or 0) + listH < #wRows then
+                        st.wizardScroll = (st.wizardScroll or 0) + 1
+                    end
+                end)
+            end
+            
+            local btnW = 8
+            local startX = math.floor((w - (btnW * 3 + 2)) / 2) + 1
+            
+            local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
+            local btnLabel = isLastStep and "Record" or "Next"
+            
+            if st.wizardStep > 1 then
+                self:button(startX, yBot - 1, btnW, "Back", false, function()
+                    st.wizardStep = st.wizardStep - 1
+                    st.wizardSelected = 1
+                    st.wizardScroll = 0
+                end, { bg = colors.gray })
+                self:button(startX + btnW + 1, yBot - 1, btnW, "Cancel", false, function()
+                    st.mode = "list"
+                end, { bg = colors.red })
+                self:button(startX + (btnW + 1) * 2, yBot - 1, btnW, btnLabel, true, function()
+                    self:wizardNext(wRows)
+                end, { bgActive = colors.green })
+            else
+                self:button(startX + btnW + 1, yBot - 1, btnW, "Cancel", false, function()
+                    st.mode = "list"
+                end, { bg = colors.red })
+                self:button(startX + (btnW + 1) * 2, yBot - 1, btnW, "Next", true, function()
+                    self:wizardNext(wRows)
+                end, { bgActive = colors.green })
+            end
+            return
+        end
+        
+        local rows = {}
+        for _, r in ipairs(list) do
+            local name = self.deps.lang.display(r.id, r.name)
+            local type = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
+            table.insert(rows, string.format("[%s] %-24s x%d", type, name:sub(1, 24), r.output or 1))
+        end
+        if #rows == 0 then
+            widgets.center(yTop + 1, "No recipes", colors.gray)
+        else
+            widgets.list(1, yTop, w, h - 2, rows, st.scroll, st.selected)
+        end
+        
+        self:button(2, yBot - 1, 16, " + Record ", false, function()
+            self:startWizard()
+        end, { bgActive = colors.green })
+        self:button(20, yBot - 1, 14, " - Delete ", false, function()
+            if list[st.selected] then
+                recipes:remove(list[st.selected].id)
+                self:addLog("Deleted recipe: " .. self.deps.lang.display(list[st.selected].id))
+            end
+        end, { bg = colors.red })
+    end
+end
 end
 
 ----------------------------------------------------------------
@@ -740,6 +1046,66 @@ function ui:renderLog(yTop, yBot, w)
     self:button(w - 4, yBot, 4, " Down ", false, function()
         if st.scroll + h < #rows then st.scroll = st.scroll + (h - 2) end
     end)
+end
+
+----------------------------------------------------------------
+-- Вкладка НАСТРОЙКИ (Settings)
+----------------------------------------------------------------
+function ui:renderSettings(yTop, yBot, w)
+    local st = self.state.settings
+    local h = yBot - yTop + 1
+    
+    -- Получаем список всех инвентарей
+    local rows = {}
+    local inventories = {}
+    for _, name in ipairs(peripheral.getNames()) do
+        local ok, p = pcall(peripheral.wrap, name)
+        if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+            -- Исключаем машины из списка
+            local isMach = false
+            if self.deps.machines then
+                for _, mn in ipairs(self.deps.machines.names) do
+                    if mn == name then isMach = true; break end
+                end
+            end
+            if not isMach then
+                table.insert(inventories, name)
+            end
+        end
+    end
+    
+    -- Строим строки для списка с пометкой текущего выбранного
+    local currentGrid = self.configData.grid_chest
+    for _, name in ipairs(inventories) do
+        local label = name
+        if name == currentGrid then
+            label = "[*] " .. name .. " (Default)"
+        else
+            label = "[ ] " .. name
+        end
+        table.insert(rows, label)
+    end
+    
+    term.setTextColor(colors.cyan)
+    widgets.text(2, yTop, "Choose Crafting Grid Chest:", colors.cyan, colors.black)
+    
+    local listH = h - 2
+    if #rows == 0 then
+        widgets.center(math.floor((yTop + yBot) / 2), "No chests found", colors.gray)
+    else
+        -- Рисуем список
+        widgets.list(1, yTop + 1, w, listH, rows, st.scroll, st.selected)
+        
+        -- Кнопки прокрутки
+        self:button(w - 4, yTop + 1, 4, " Up ", false, function()
+            st.scroll = math.max(0, st.scroll - (listH - 2))
+        end)
+        self:button(w - 4, yBot, 4, " Down ", false, function()
+            if st.scroll + listH < #rows then
+                st.scroll = st.scroll + (listH - 2)
+            end
+        end)
+    end
 end
 
 ----------------------------------------------------------------
@@ -771,52 +1137,111 @@ end
 --- Обработать тап внутри списка (выбор элемента).
 function ui:handleListTouch(x, y)
     local w, _ = self.monitor.getSize()
-    -- не обрабатываем тапы по кнопкам прокрутки (правый край)
-    if x > w - 5 then return end
     local tab = self.activeTab
     local st = self.state[tab]
     if not st then return end
-    if tab == "recipes" and st.mode == "learn_select" then
-        local yTop = 4
-        local yListTop = yTop + 2
-        local idx = y - yListTop + 1 + (st.wizardScroll or 0)
-        local rows = {}
-        if st.wizardStep == 1 then
-            rows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
-        elseif st.wizardStep == 2 then
-            for _, name in ipairs(peripheral.getNames()) do
-                local ok, p = pcall(peripheral.wrap, name)
-                if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                    local isMach = false
-                    if self.deps.machines then
-                        for _, mn in ipairs(self.deps.machines.names) do
-                            if mn == name then isMach = true; break end
+    
+    if tab == "recipes" then
+        local isSplit = (w >= 34)
+        local wLeft = isSplit and math.floor(w * 0.45) or w
+        if isSplit and wLeft < 15 then wLeft = 15 end
+        
+        if isSplit then
+            if x <= wLeft then
+                local yTopList = 4
+                local idx = y - yTopList + 1 + (st.scroll or 0)
+                local list = self.deps.recipes:all()
+                if list[idx] then st.selected = idx end
+            elseif st.mode == "learn_select" and x >= wLeft + 2 and x <= w - 5 then
+                local yTopList = 6
+                local idx = y - yTopList + 1 + (st.wizardScroll or 0)
+                local wRows = {}
+                if st.wizardStep == 1 then
+                    wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
+                elseif st.wizardStep == 2 then
+                    for _, name in ipairs(peripheral.getNames()) do
+                        local ok, p = pcall(peripheral.wrap, name)
+                        if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                            local isMach = false
+                            if self.deps.machines then
+                                for _, mn in ipairs(self.deps.machines.names) do
+                                    if mn == name then isMach = true; break end
+                                end
+                            end
+                            if not isMach then table.insert(wRows, name) end
                         end
                     end
-                    if not isMach then table.insert(rows, name) end
-                end
-            end
-        elseif st.wizardStep == 3 then
-            if st.learnType == 2 then
-                if self.deps.machines then
-                    for _, name in ipairs(self.deps.machines.names) do
-                        table.insert(rows, name)
+                elseif st.wizardStep == 3 then
+                    if st.learnType == 2 then
+                        if self.deps.machines then
+                            for _, name in ipairs(self.deps.machines.names) do
+                                table.insert(wRows, name)
+                            end
+                        end
+                    elseif st.learnType == 3 then
+                        if self.deps.dispatcher then
+                            local wList = self.deps.dispatcher:workerList()
+                            for _, workerInfo in ipairs(wList) do
+                                table.insert(wRows, "Worker #" .. workerInfo.id)
+                            end
+                        end
                     end
                 end
-            elseif st.learnType == 3 then
-                if self.deps.dispatcher then
-                    local wList = self.deps.dispatcher:workerList()
-                    for _, workerInfo in ipairs(wList) do
-                        table.insert(rows, "Worker #" .. workerInfo.id)
-                    end
+                if wRows[idx] then
+                    st.wizardSelected = idx
                 end
             end
-        end
-        if rows[idx] then
-            st.wizardSelected = idx
+        else
+            if st.mode == "learn_select" then
+                if x > w - 5 then return end
+                local yListTop = 6
+                local idx = y - yListTop + 1 + (st.wizardScroll or 0)
+                local wRows = {}
+                if st.wizardStep == 1 then
+                    wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
+                elseif st.wizardStep == 2 then
+                    for _, name in ipairs(peripheral.getNames()) do
+                        local ok, p = pcall(peripheral.wrap, name)
+                        if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                            local isMach = false
+                            if self.deps.machines then
+                                for _, mn in ipairs(self.deps.machines.names) do
+                                    if mn == name then isMach = true; break end
+                                end
+                            end
+                            if not isMach then table.insert(wRows, name) end
+                        end
+                    end
+                elseif st.wizardStep == 3 then
+                    if st.learnType == 2 then
+                        if self.deps.machines then
+                            for _, name in ipairs(self.deps.machines.names) do
+                                table.insert(wRows, name)
+                            end
+                        end
+                    elseif st.learnType == 3 then
+                        if self.deps.dispatcher then
+                            local wList = self.deps.dispatcher:workerList()
+                            for _, workerInfo in ipairs(wList) do
+                                table.insert(wRows, "Worker #" .. workerInfo.id)
+                            end
+                        end
+                    end
+                end
+                if wRows[idx] then
+                    st.wizardSelected = idx
+                end
+            else
+                if x > w - 5 then return end
+                local idx = y - 4 + 1 + (st.scroll or 0)
+                local list = self.deps.recipes:all()
+                if list[idx] then st.selected = idx end
+            end
         end
         return
     end
+    
+    if x > w - 5 then return end
     if not st.selected then return end
     local yTop = 4
     local idx = y - yTop + 1 + (st.scroll or 0)
@@ -834,9 +1259,29 @@ function ui:handleListTouch(x, y)
     elseif tab == "machines" then
         list = self.deps.machines.names
         if list[idx] then st.selected = idx end
-    elseif tab == "recipes" then
-        list = self.deps.recipes:all()
-        if list[idx] then st.selected = idx end
+    elseif tab == "settings" then
+        local inventories = {}
+        for _, name in ipairs(peripheral.getNames()) do
+            local ok, p = pcall(peripheral.wrap, name)
+            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                local isMach = false
+                if self.deps.machines then
+                    for _, mn in ipairs(self.deps.machines.names) do
+                        if mn == name then isMach = true; break end
+                    end
+                end
+                if not isMach then table.insert(inventories, name) end
+            end
+        end
+        local yTopList = 5
+        local idx = y - yTopList + 1 + (st.scroll or 0)
+        if inventories[idx] then
+            st.selected = idx
+            local selectedChest = inventories[idx]
+            self.configData.grid_chest = selectedChest
+            config.save(self.configData)
+            self:addLog("Default grid: " .. selectedChest)
+        end
     end
 end
 
@@ -919,6 +1364,22 @@ function ui:moveSelection(delta)
     if self.activeTab == "craft" then list = self.deps.recipes:all()
     elseif self.activeTab == "storage" then list = self.deps.storage:items()
     elseif self.activeTab == "recipes" then list = self.deps.recipes:all()
+    elseif self.activeTab == "settings" then
+        local count = 0
+        for _, name in ipairs(peripheral.getNames()) do
+            local ok, p = pcall(peripheral.wrap, name)
+            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
+                local isMach = false
+                if self.deps.machines then
+                    for _, mn in ipairs(self.deps.machines.names) do
+                        if mn == name then isMach = true; break end
+                    end
+                end
+                if not isMach then count = count + 1 end
+            end
+        end
+        st.selected = util.clamp(st.selected + delta, 1, math.max(1, count))
+        return
     else return end
     st.selected = util.clamp(st.selected + delta, 1, math.max(1, #list))
 end

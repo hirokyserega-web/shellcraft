@@ -249,34 +249,8 @@ function recipes:learnFromStorage(invName)
     local size = p.size()
     local inventoryList = p.list()
     
-    -- Ищем колонки рецепта (в пределах первых 3 рядов)
-    local colMin = 9
-    local hasRecipeItems = false
-    for slot = 1, math.min(27, size) do
-        local item = inventoryList[slot]
-        if item then
-            local col = (slot - 1) % 9 + 1
-            if col < colMin then
-                colMin = col
-            end
-            hasRecipeItems = true
-        end
-    end
-    
-    if not hasRecipeItems then
-        return false, "no items found in first 3 rows of storage"
-    end
-    
-    if colMin > 7 then
-        colMin = 7
-    end
-    
-    local gridCols = {
-        [colMin] = 1,
-        [colMin + 1] = 2,
-        [colMin + 2] = 3
-    }
-    
+    -- Для маленьких сундуков (до 27 слотов): слоты 1-9 = 3x3 сетка, слот 10+ = результат
+    -- Для больших (54 слота, двойной сундук): 9-колоночная раскладка как раньше
     local pattern = {}
     for r = 1, 3 do
         pattern[r] = {}
@@ -287,28 +261,73 @@ function recipes:learnFromStorage(invName)
     
     local outputSlot = nil
     local outputItem = nil
+    local hasRecipeItems = false
     
-    for slot = 1, size do
-        local item = inventoryList[slot]
-        if item then
-            local row = math.floor((slot - 1) / 9) + 1
-            local col = (slot - 1) % 9 + 1
-            
-            local isRecipeSlot = (row <= 3) and gridCols[col]
-            if isRecipeSlot then
-                local gridCol = gridCols[col]
-                pattern[row][gridCol] = { id = item.name, count = item.count or 1 }
-            else
-                if not outputSlot then
-                    outputSlot = slot
-                    outputItem = item
+    if size <= 27 then
+        -- Простой режим: слоты 1-9 = 3x3 сетка
+        for slot = 1, math.min(9, size) do
+            local item = inventoryList[slot]
+            if item then
+                local row = math.floor((slot - 1) / 3) + 1
+                local col = (slot - 1) % 3 + 1
+                pattern[row][col] = { id = item.name, count = item.count or 1 }
+                hasRecipeItems = true
+            end
+        end
+        -- Результат ищем в слотах 10+
+        for slot = 10, size do
+            local item = inventoryList[slot]
+            if item and not outputSlot then
+                outputSlot = slot
+                outputItem = item
+            end
+        end
+    else
+        -- Режим 9-колоночного сундука (двойной сундук):
+        -- Первые 3 ряда по 9 колонок, крайние левые 3 колонки = сетка
+        local colMin = 9
+        for slot = 1, math.min(27, size) do
+            local item = inventoryList[slot]
+            if item then
+                local col = (slot - 1) % 9 + 1
+                if col < colMin then colMin = col end
+                hasRecipeItems = true
+            end
+        end
+        if colMin > 7 then colMin = 7 end
+        
+        local gridCols = {
+            [colMin] = 1,
+            [colMin + 1] = 2,
+            [colMin + 2] = 3
+        }
+        
+        for slot = 1, size do
+            local item = inventoryList[slot]
+            if item then
+                local row = math.floor((slot - 1) / 9) + 1
+                local col = (slot - 1) % 9 + 1
+                
+                local isRecipeSlot = (row <= 3) and gridCols[col]
+                if isRecipeSlot then
+                    local gridCol = gridCols[col]
+                    pattern[row][gridCol] = { id = item.name, count = item.count or 1 }
+                else
+                    if not outputSlot then
+                        outputSlot = slot
+                        outputItem = item
+                    end
                 end
             end
         end
     end
     
+    if not hasRecipeItems then
+        return false, "no items in crafting grid (place items in slots 1-9)"
+    end
+    
     if not outputSlot or not outputItem then
-        return false, "could not find output item (place it outside the 3x3 crafting grid columns)"
+        return false, "no output item found (place result in slot 10+)"
     end
     
     local displayName = nil
@@ -445,30 +464,9 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
         return false, "cannot wrap turtle peripheral: " .. tostring(turtleName)
     end
     
-    -- 1. Читаем раскладку из первых 3 рядов сундука
+    -- 1. Читаем раскладку из сундука
     local storageSize = pStorage.size()
     local storageList = pStorage.list()
-    
-    local colMin = 9
-    local hasRecipeItems = false
-    for slot = 1, math.min(27, storageSize) do
-        local item = storageList[slot]
-        if item then
-            local col = (slot - 1) % 9 + 1
-            if col < colMin then colMin = col end
-            hasRecipeItems = true
-        end
-    end
-    if not hasRecipeItems then
-        return false, "no items found in first 3 rows of storage"
-    end
-    if colMin > 7 then colMin = 7 end
-    
-    local gridCols = {
-        [colMin] = 1,
-        [colMin + 1] = 2,
-        [colMin + 2] = 3
-    }
     
     local pattern = {}
     local transfers = {}
@@ -481,19 +479,59 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
         end
     end
     
-    for slot = 1, math.min(27, storageSize) do
-        local item = storageList[slot]
-        if item then
-            local row = math.floor((slot - 1) / 9) + 1
-            local col = (slot - 1) % 9 + 1
-            if gridCols[col] then
-                local gridCol = gridCols[col]
-                pattern[row][gridCol] = { id = item.name, count = 1 }
-                local gridIdx = (row - 1) * 3 + gridCol
+    local hasRecipeItems = false
+    
+    if storageSize <= 27 then
+        -- Простой режим: слоты 1-9 = 3x3 сетка
+        for slot = 1, math.min(9, storageSize) do
+            local item = storageList[slot]
+            if item then
+                local row = math.floor((slot - 1) / 3) + 1
+                local col = (slot - 1) % 3 + 1
+                pattern[row][col] = { id = item.name, count = 1 }
+                local gridIdx = (row - 1) * 3 + col
                 local turtleSlot = GRID[gridIdx]
                 table.insert(transfers, { srcSlot = slot, dstSlot = turtleSlot })
+                hasRecipeItems = true
             end
         end
+    else
+        -- Режим 9-колоночного двойного сундука
+        local colMin = 9
+        for slot = 1, math.min(27, storageSize) do
+            local item = storageList[slot]
+            if item then
+                local col = (slot - 1) % 9 + 1
+                if col < colMin then colMin = col end
+                hasRecipeItems = true
+            end
+        end
+        if colMin > 7 then colMin = 7 end
+        
+        local gridCols = {
+            [colMin] = 1,
+            [colMin + 1] = 2,
+            [colMin + 2] = 3
+        }
+        
+        for slot = 1, math.min(27, storageSize) do
+            local item = storageList[slot]
+            if item then
+                local row = math.floor((slot - 1) / 9) + 1
+                local col = (slot - 1) % 9 + 1
+                if gridCols[col] then
+                    local gridCol = gridCols[col]
+                    pattern[row][gridCol] = { id = item.name, count = 1 }
+                    local gridIdx = (row - 1) * 3 + gridCol
+                    local turtleSlot = GRID[gridIdx]
+                    table.insert(transfers, { srcSlot = slot, dstSlot = turtleSlot })
+                end
+            end
+        end
+    end
+    
+    if not hasRecipeItems then
+        return false, "no items in crafting grid (place items in slots 1-9)"
     end
     
     -- Очищаем черепаху в сундук

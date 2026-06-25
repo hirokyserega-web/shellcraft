@@ -295,6 +295,8 @@ function dispatcher:handleMessage(senderId, msg)
     if not msg or not msg.type then return end
     if msg.type == net.MSG.WORKER_HELLO then
         self:addWorker(senderId, msg.payload)
+        -- Send a discover back to let the worker register the Core ID
+        net.send(senderId, net.MSG.DISCOVER, { core = os.getComputerID() })
     elseif msg.type == net.MSG.WORKER_BYE then
         self:removeWorker(senderId)
     elseif msg.type == net.MSG.STATUS then

@@ -211,11 +211,16 @@ end
 
 --- Главный цикл воркера.
 function worker:run()
+    -- Открываем модемы
+    if not net.open() then
+        util.warn("No modem! Please attach a wired or wireless modem to the turtle.")
+    end
+
     util.ok("Worker #" .. os.getComputerID() .. " started, waiting for tasks")
     -- Первичный HELLO (broadcast) — Core подхватит
     self:sayHello(nil)
     -- Периодический heartbeat
-    local lastBeat = 0
+    local lastBeat = os.clock()
     while true do
         local senderId, msg = net.receive(5)
         if senderId and msg then
@@ -288,9 +293,13 @@ function worker:run()
                 util.warn("Received cancel for task " .. tostring(msg.payload and msg.payload.task_id))
             end
         end
-        -- Heartbeat Core раз в 10 сек
-        if self.core_id and os.clock() - lastBeat > 10 then
-            net.send(self.core_id, net.MSG.HEARTBEAT, { id = os.getComputerID(), busy = self.crafting })
+        -- Heartbeat Core или трансляция присутствия раз в 10 сек
+        if os.clock() - lastBeat > 10 then
+            if self.core_id then
+                net.send(self.core_id, net.MSG.HEARTBEAT, { id = os.getComputerID(), busy = self.crafting })
+            else
+                self:sayHello(nil)
+            end
             lastBeat = os.clock()
         end
     end

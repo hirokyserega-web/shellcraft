@@ -45,9 +45,15 @@ local function fetch(url)
     local separator = url:find("%?") and "&" or "?"
     local busterUrl = url .. separator .. "t=" .. t
     
+    local headers = {
+        ["Cache-Control"] = "no-cache, no-store, must-revalidate",
+        ["Pragma"] = "no-cache",
+        ["Expires"] = "0"
+    }
+    
     local retries = 3
     for attempt = 1, retries do
-        local r = http.get(busterUrl)
+        local r = http.get(busterUrl, headers)
         if r then
             local body = r.readAll()
             r.close()

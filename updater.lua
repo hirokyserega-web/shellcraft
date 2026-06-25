@@ -50,7 +50,7 @@ function updater.localVersion()
     return (v:gsub("%s", ""))
 end
 
---- Скачать текстовый файл с URL (с 3 попытками и экспоненциальным бэкоффом).
+--- Скачать текстовый файл с URL (с 3 попытками, кэш-бастингом и экспоненциальным бэкоффом).
 -- @return content или nil
 function updater.fetch(url)
     local t = tostring(math.random(100000, 999999))
@@ -60,9 +60,15 @@ function updater.fetch(url)
     local separator = url:find("%?") and "&" or "?"
     local busterUrl = url .. separator .. "t=" .. t
     
+    local headers = {
+        ["Cache-Control"] = "no-cache, no-store, must-revalidate",
+        ["Pragma"] = "no-cache",
+        ["Expires"] = "0"
+    }
+    
     local retries = 3
     for attempt = 1, retries do
-        local response = http.get(busterUrl)
+        local response = http.get(busterUrl, headers)
         if response then
             local body = response.readAll()
             response.close()

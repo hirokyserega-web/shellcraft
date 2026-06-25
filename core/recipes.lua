@@ -312,9 +312,11 @@ function recipes:learnFromStorage(invName)
     end
     
     local displayName = nil
-    local ok, detail = pcall(p.getItemDetail, outputSlot)
-    if ok and detail and detail.displayName then
-        displayName = detail.displayName
+    if p.getItemDetail then
+        local ok, detail = pcall(p.getItemDetail, outputSlot)
+        if ok and detail and detail.displayName then
+            displayName = detail.displayName
+        end
     end
     
     local recipe = {
@@ -380,14 +382,21 @@ function recipes:activeLearnMachine(storageName, machineName)
         return false, "could not push item to machine"
     end
     
-    -- Ждем завершения (таймаут 60 сек)
     local outputItemDetail = nil
     local deadline = os.clock() + 60
     while os.clock() < deadline do
-        local ok, detail = pcall(pMachine.getItemDetail, mSlots.output)
-        if ok and detail and detail.name then
-            outputItemDetail = detail
-            break
+        if pMachine.list then
+            local ok, items = pcall(pMachine.list)
+            if ok and items and items[mSlots.output] then
+                outputItemDetail = items[mSlots.output]
+                if pMachine.getItemDetail then
+                    local ok2, det = pcall(pMachine.getItemDetail, mSlots.output)
+                    if ok2 and det and det.displayName then
+                        outputItemDetail.displayName = det.displayName
+                    end
+                end
+                break
+            end
         end
         os.sleep(0.5)
     end

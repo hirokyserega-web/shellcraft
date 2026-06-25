@@ -218,9 +218,11 @@ function storage:displayName(id)
             if ok and items then
                 for slot, info in pairs(items) do
                     if info.name == id then
-                        local ok2, det = pcall(p.getItemDetail, slot)
-                        if ok2 and det and det.displayName then
-                            return det.displayName
+                        if p.getItemDetail then
+                            local ok2, det = pcall(p.getItemDetail, slot)
+                            if ok2 and det and det.displayName then
+                                return det.displayName
+                            end
                         end
                     end
                 end

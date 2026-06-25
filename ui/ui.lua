@@ -736,6 +736,8 @@ function ui:renderRecipes(yTop, yBot, w)
         ------------------------------------------------------------
         -- RIGHT COLUMN: Recipe detail / wizard
         ------------------------------------------------------------
+        widgets.clearArea(startX, yTop, wRight, h)
+        
         if st.mode == "learn_select" then
             term.setTextColor(colors.cyan)
             local titles = {
@@ -904,7 +906,6 @@ function ui:renderRecipes(yTop, yBot, w)
                     self:startWizard()
                 end)
             else
-                widgets.clearArea(startX, yTop, wRight, h)
                 local centerY = math.floor((yTop + yBot) / 2)
                 widgets.text(startX + math.floor((wRight - #("Select recipe")) / 2), centerY, "Select recipe", colors.gray)
                 local btnW = 12

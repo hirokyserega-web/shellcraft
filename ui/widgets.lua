@@ -344,13 +344,14 @@ end
 --- Полоса прогресса.
 function widgets.progress(x, y, w, value, max)
     local filled = max > 0 and math.floor(value / max * w) or 0
+    term.setCursorPos(x, y)
     term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.white)
-    term.setCursorPos(x, y)
-    term.write(string.rep("░", w))
-    term.setBackgroundColor(colors.green)
-    term.setCursorPos(x, y)
-    term.write(string.rep("█", math.min(filled, w)))
+    term.write(string.rep(" ", w))
+    if filled > 0 then
+        term.setBackgroundColor(colors.green)
+        term.setCursorPos(x, y)
+        term.write(string.rep(" ", math.min(filled, w)))
+    end
 end
 
 return widgets

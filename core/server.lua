@@ -131,27 +131,33 @@ function server.run()
     end
 
     local function storageScanLoop()
+        local lastSaveTime = os.clock()
         while true do
             st:scan()
             mach:collectReady()
-            -- Периодически пополняем кеш имён и сбрасываем на диск
-            st:collectNames(names)
-            names.saveCache()
-            -- Периодический rediscovery воркеров
+            -- Периодически пополняем кеш имён и сбрасываем на диск только при новых ID или раз в 60с
+            local newItems = false
+            for id in pairs(st.cache) do
+                if not names.cache[id] then
+                    newItems = true
+                    break
+                end
+            end
+            local now = os.clock()
+            if newItems or (now - lastSaveTime) > 60 then
+                st:collectNames(names)
+                names.saveCache()
+                lastSaveTime = now
+            end
             os.sleep(2)
         end
     end
 
     local function discoveryLoop()
         while true do
-            os.sleep(cfg.heartbeat_interval or 10)
-            local found2 = net.discoverWorkers(2)
-            for wid, info in pairs(found2) do
-                if not disp.workers[wid] then
-                    disp:addWorker(wid, info)
-                    uiInstance:addLog("Worker #" .. wid .. " connected")
-                end
-            end
+            -- Неблокирующий broadcast DISCOVER; ответы обрабатывает netListener через handleMessage
+            net.broadcast(net.MSG.DISCOVER, { core = os.getComputerID() })
+            os.sleep(45)
         end
     end
 

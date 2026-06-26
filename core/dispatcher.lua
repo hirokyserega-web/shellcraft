@@ -27,7 +27,7 @@ function dispatcher.new(storage, machines)
     self.queue = {}       -- массив task_id
     self.maxAttempts = 3
     self.task_timeout = 120  -- fallback per-task deadline in seconds (configurable)
-    self.heartbeat_grace = 20  -- seconds to ignore stale busy=false heartbeats after dispatch
+    self.heartbeat_grace = 15  -- seconds to ignore stale busy=false heartbeats after dispatch
     self.onEvent = nil
     return self
 end
@@ -199,8 +199,18 @@ function dispatcher:prepareIngredients(workerId, task)
     if not p then
         return false, "Turtle #"..tostring(workerId).." is not reachable. Connect the turtle to a WIRED modem and ENABLE it (right-click the modem, it must glow red)."
     end
-    -- Очистить инвентарь черепахи от старых предметов (вернуть в хранилище)
-    self:collectResult(workerId)
+    -- Очистить инвентарь черепахи от старых предметов (только если они там есть)
+    local listOk, listItems = pcall(p.list)
+    local hasItems = false
+    if listOk and listItems then
+        for _, _ in pairs(listItems) do
+            hasItems = true
+            break
+        end
+    end
+    if hasItems then
+        self:collectResult(workerId)
+    end
     local ings = recipes.ingredientsFor(task.recipe, task.count)
     for _, ing in ipairs(ings) do
         -- Кладём без указания слота — pushItems сам распределит
@@ -224,8 +234,13 @@ function dispatcher:collectResult(workerId)
     local p = peripheral.wrap(turtleName)
     if not p then return 0 end
     local total = 0
-    for slot = 1, 16 do
-        total = total + self.storage:deposit(turtleName, slot, nil)
+    local ok, list = pcall(p.list)
+    if ok and list then
+        for slot, item in pairs(list) do
+            if item and (item.count or 0) > 0 then
+                total = total + self.storage:deposit(turtleName, slot, nil)
+            end
+        end
     end
     return total
 end

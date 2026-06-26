@@ -16,7 +16,7 @@ config.defaults = {
     net_timeout = 5,
     heartbeat_interval = 10,
     task_timeout = 120,        -- per-task crafting deadline in seconds
-    heartbeat_grace = 20,      -- seconds to ignore stale busy=false heartbeats after dispatch
+    heartbeat_grace = 15,      -- seconds to ignore stale busy=false heartbeats after dispatch
     use_russian_names = false, -- Requires a Cyrillic font resource pack or transliteration
     text_scale = 0.5,          -- Text scale for monitor (e.g. 1.0 or 0.5)
     grid_chest = nil,          -- default storage grid chest for recording recipes

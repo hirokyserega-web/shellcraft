@@ -401,7 +401,14 @@ function ui:renderCraft(yTop, yBot, w)
         local bodyFn = function(cx, cy, cw, ch)
             widgets.text(cx, cy, "Item: " .. widgets.clip(name, cw), colors.white, colors.black)
             widgets.text(cx, cy + 1, string.format("Have: %d  Output: %d", inStore, r.output or 1), colors.lightGray, colors.black)
-            widgets.text(cx, cy + 2, "Qty: " .. st.qty, colors.yellow, colors.black)
+            
+            local crafts = math.ceil(qty / (r.output or 1))
+            local actualQty = crafts * (r.output or 1)
+            local qtyText = "Qty: " .. st.qty
+            if actualQty ~= qty then
+                qtyText = qtyText .. " (Yields: " .. actualQty .. ")"
+            end
+            widgets.text(cx, cy + 2, qtyText, colors.yellow, colors.black)
             
             -- Вычисляем ETA и BOM
             if qty > 0 then
@@ -438,13 +445,15 @@ function ui:renderCraft(yTop, yBot, w)
                     end
                 end)
                 -- Также добавляем компактный Stepper внизу
+                local step = r.output or 1
                 widgets.stepper(self, cx, cy + 4, cw - 13, qty, function(delta)
-                    st.qty = tostring(math.max(1, qty + delta))
+                    st.qty = tostring(math.max(step, qty + delta * step))
                 end)
             else
                 -- Если Numpad не влезает, используем только Stepper на всю ширину
+                local step = r.output or 1
                 widgets.stepper(self, cx, cy + 4, cw, qty, function(delta)
-                    st.qty = tostring(math.max(1, qty + delta))
+                    st.qty = tostring(math.max(step, qty + delta * step))
                 end)
             end
         end

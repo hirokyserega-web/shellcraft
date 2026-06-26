@@ -76,10 +76,10 @@ local function clearCraftingGrid()
     turtle.select(1)
 end
 
---- Найти слот 13-16 с предметом данного id и нужным количеством.
+--- Найти слот 1-16 с предметом данного id.
 -- @return слот или nil
 local function findSlotWith(id, fromSlot)
-    fromSlot = fromSlot or 13
+    fromSlot = fromSlot or 1
     for s = fromSlot, 16 do
         local detail = turtle.getItemDetail(s)
         if detail and detail.name == id then
@@ -102,19 +102,27 @@ local function layoutShaped(recipe, crafts)
         local targetId = recipe.pattern[row] and recipe.pattern[row][col]
         if targetId then
             local need = crafts
-            local searchFrom = 13
+            local searchFrom = 1
+            local gridSlot = GRID[i]
             while need > 0 do
                 local s = findSlotWith(targetId, searchFrom)
                 if not s then
                     return false, "ingredient not found in turtle inventory: " .. lang.localize(targetId)
                 end
-                local detail = turtle.getItemDetail(s)
-                local take = math.min(need, detail.count)
-                turtle.select(s)
-                local gridSlot = GRID[i]
-                turtle.transferTo(gridSlot, take)
-                need = need - take
-                searchFrom = s + 1
+                if s == gridSlot then
+                    local detail = turtle.getItemDetail(s)
+                    local existing = detail and detail.count or 0
+                    local take = math.min(need, existing)
+                    need = need - take
+                    searchFrom = s + 1
+                else
+                    local detail = turtle.getItemDetail(s)
+                    local take = math.min(need, detail.count)
+                    turtle.select(s)
+                    turtle.transferTo(gridSlot, take)
+                    need = need - take
+                    searchFrom = s + 1
+                end
             end
         end
     end
@@ -135,19 +143,27 @@ local function layoutShapeless(recipe, crafts)
         if need > 64 then
             return false, "too many " .. lang.localize(ing.id) .. " (" .. need .. ">64)"
         end
-        local searchFrom = 13
+        local searchFrom = 1
+        local gridSlot = GRID[idx]
         while need > 0 do
             local s = findSlotWith(ing.id, searchFrom)
             if not s then
                 return false, "ingredient not found in turtle inventory: " .. lang.localize(ing.id)
             end
-            local detail = turtle.getItemDetail(s)
-            local take = math.min(need, detail.count)
-            turtle.select(s)
-            local gridSlot = GRID[idx]
-            turtle.transferTo(gridSlot, take)
-            need = need - take
-            searchFrom = s + 1
+            if s == gridSlot then
+                local detail = turtle.getItemDetail(s)
+                local existing = detail and detail.count or 0
+                local take = math.min(need, existing)
+                need = need - take
+                searchFrom = s + 1
+            else
+                local detail = turtle.getItemDetail(s)
+                local take = math.min(need, detail.count)
+                turtle.select(s)
+                turtle.transferTo(gridSlot, take)
+                need = need - take
+                searchFrom = s + 1
+            end
         end
         idx = idx + 1
     end

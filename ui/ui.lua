@@ -457,12 +457,16 @@ function ui:renderStorage(yTop, yBot, w)
     local items = self.deps.storage:items()
     local h = yBot - yTop + 1
     
-    -- Кнопки Toggle Keyboard и Clear
-    local keyW = w >= 39 and 10 or 7
-    widgets.button(self, w - keyW * 2 - 2, yTop, keyW, "Keyboard", { selected = st.showKeyboard }, function()
+    -- Кнопки Toggle Keyboard и Clear (динамический расчет ширины)
+    local keyLabel = (w >= 39) and "Keyboard" or "Keybrd"
+    local clearLabel = "Clear"
+    local w1 = #keyLabel + 2
+    local w2 = #clearLabel + 2
+    
+    widgets.button(self, w - w1 - w2 - 2, yTop, w1, keyLabel, { selected = st.showKeyboard }, function()
         st.showKeyboard = not st.showKeyboard
     end)
-    widgets.button(self, w - keyW - 1, yTop, keyW, "Clear", { kind = "danger" }, function()
+    widgets.button(self, w - w2 - 1, yTop, w2, clearLabel, { kind = "danger" }, function()
         st.search = ""
         st.scroll = 0
         st.selected = 1
@@ -480,12 +484,12 @@ function ui:renderStorage(yTop, yBot, w)
         end
     end
     
-    -- Расчет высоты с учетом клавиатуры
+    -- Расчет высоты с учетом клавиатуры (размещаем клавиатуру до yBot)
     local listH = h - 1
     local listBot = yBot
     if st.showKeyboard then
-        listH = h - 5
-        listBot = yBot - 4
+        listH = h - 4
+        listBot = yBot - 3
     end
     
     local rows = {}
@@ -504,7 +508,7 @@ function ui:renderStorage(yTop, yBot, w)
     end
     
     if st.showKeyboard then
-        self:drawKeyboard(math.max(2, math.floor((w - 29) / 2) + 1), yBot - 3)
+        self:drawKeyboard(math.max(2, math.floor((w - 29) / 2) + 1), yBot - 2)
     end
 end
 
@@ -756,19 +760,36 @@ function ui:renderRecipes(yTop, yBot, w)
             st.wizardScroll = wizardState.scroll
             st.wizardSelected = wizardState.selected
             
-            -- Кнопки мастера
-            local btnW = 5
-            widgets.button(self, startX, yBot, btnW, "Back", { kind = "normal" }, function()
+            -- Кнопки мастера (динамический расчет ширины для исключения перекрытия)
+            local label1 = "Back"
+            local label2 = "Cancel"
+            local label3 = (st.wizardStep == 3 or (st.wizardStep == 2 and st.learnType == 1)) and "Record" or "Next"
+            
+            local w1 = #label1 + 2
+            local w2 = #label2 + 2
+            local w3 = #label3 + 2
+            
+            if w1 + w2 + w3 + 2 > wRight then
+                label1 = "Bk"
+                label2 = "Can"
+                label3 = (label3 == "Record") and "Rec" or "Nxt"
+                w1 = #label1 + 2
+                w2 = #label2 + 2
+                w3 = #label3 + 2
+            end
+            
+            local totalW = w1 + w2 + w3 + 2
+            local btnStartX = startX + math.floor((wRight - totalW) / 2)
+            
+            widgets.button(self, btnStartX, yBot, w1, label1, { kind = "normal" }, function()
                 st.wizardStep = math.max(1, st.wizardStep - 1)
                 st.wizardSelected = 1
                 st.wizardScroll = 0
             end)
-            widgets.button(self, startX + btnW + 1, yBot, btnW, "Cancel", { kind = "danger" }, function()
+            widgets.button(self, btnStartX + w1 + 1, yBot, w2, label2, { kind = "danger" }, function()
                 st.mode = "list"
             end)
-            
-            local btnLabel = (st.wizardStep == 3 or (st.wizardStep == 2 and st.learnType == 1)) and "Record" or "Next"
-            widgets.button(self, startX + (btnW + 1) * 2, yBot, btnW, btnLabel, { kind = "active" }, function()
+            widgets.button(self, btnStartX + w1 + w2 + 2, yBot, w3, label3, { kind = "active" }, function()
                 self:wizardNext(wRows)
             end)
         else
@@ -796,11 +817,26 @@ function ui:renderRecipes(yTop, yBot, w)
                 widgets.text(startX, yTop + 2, "No recipe selected", colors.gray, colors.black)
             end
             
-            -- Кнопки действий
-            widgets.button(self, startX, yBot, 8, "Record", { kind = "active" }, function()
+            -- Кнопки действий (динамический расчет ширины)
+            local label1 = "Record"
+            local label2 = "Wizard"
+            local w1 = #label1 + 2
+            local w2 = #label2 + 2
+            
+            if w1 + w2 + 1 > wRight then
+                label1 = "Rec"
+                label2 = "Wiz"
+                w1 = #label1 + 2
+                w2 = #label2 + 2
+            end
+            
+            local totalW = w1 + w2 + 1
+            local btnStartX = startX + math.floor((wRight - totalW) / 2)
+            
+            widgets.button(self, btnStartX, yBot, w1, label1, { kind = "active" }, function()
                 self:quickRecord()
             end)
-            widgets.button(self, startX + 9, yBot, 6, "Wizard", { kind = "normal" }, function()
+            widgets.button(self, btnStartX + w1 + 1, yBot, w2, label2, { kind = "normal" }, function()
                 self:startWizard()
             end)
         end
@@ -819,13 +855,33 @@ function ui:renderRecipes(yTop, yBot, w)
             widgets.text(2, yTop + 2, "No recipes", colors.gray, colors.black)
         end
         
-        widgets.button(self, 1, yBot, 6, "Record", { kind = "active" }, function()
+        -- Кнопки действий (динамический расчет ширины для малых экранов)
+        local label1 = "Record"
+        local label2 = "Wizard"
+        local label3 = "Delete"
+        local w1 = #label1 + 2
+        local w2 = #label2 + 2
+        local w3 = #label3 + 2
+        
+        if w1 + w2 + w3 + 2 > w then
+            label1 = "Rec"
+            label2 = "Wiz"
+            label3 = "Del"
+            w1 = #label1 + 2
+            w2 = #label2 + 2
+            w3 = #label3 + 2
+        end
+        
+        local totalW = w1 + w2 + w3 + 2
+        local btnStartX = math.floor((w - totalW) / 2) + 1
+        
+        widgets.button(self, btnStartX, yBot, w1, label1, { kind = "active" }, function()
             self:quickRecord()
         end)
-        widgets.button(self, 8, yBot, 6, "Wizard", { kind = "normal" }, function()
+        widgets.button(self, btnStartX + w1 + 1, yBot, w2, label2, { kind = "normal" }, function()
             self:startWizard()
         end)
-        widgets.button(self, 15, yBot, 6, "Delete", { kind = "danger" }, function()
+        widgets.button(self, btnStartX + w1 + w2 + 2, yBot, w3, label3, { kind = "danger" }, function()
             local r = list[st.selected]
             if r then
                 recipes:remove(r.id)

@@ -55,6 +55,7 @@ function worker:sendResult(taskId, success, payload)
 end
 
 local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
+local EXTRA_SLOTS = {4, 8, 12, 13, 14, 15, 16}
 
 --- Попытаться сбросить предмет во внешний инвентарь (соседний или на сети).
 local function dropToExternal(slot)
@@ -79,15 +80,14 @@ local function dropToExternal(slot)
     return false
 end
 
---- Очистить инвентарь черепахи (вернуть всё из слотов сетки в слоты 13-16).
+--- Очистить инвентарь черепахи (вернуть всё из слотов сетки в EXTRA_SLOTS).
 local function clearCraftingGrid()
-    local extraSlots = {13, 14, 15, 16}
     for _, s in ipairs(GRID) do
         if turtle.getItemCount(s) > 0 then
-            -- 1. Try to transfer to slots 13-16
+            -- 1. Try to transfer to EXTRA_SLOTS
             local item = turtle.getItemDetail(s)
             if item then
-                for _, dst in ipairs(extraSlots) do
+                for _, dst in ipairs(EXTRA_SLOTS) do
                     local dstItem = turtle.getItemDetail(dst)
                     if not dstItem or (dstItem.name == item.name and turtle.getItemSpace(dst) > 0) then
                         turtle.select(s)
@@ -124,14 +124,17 @@ local function clearCraftingGrid()
     return true
 end
 
---- Найти слот 1-16 с предметом данного id.
--- @return слот или nil
-local function findSlotWith(id, fromSlot)
-    fromSlot = fromSlot or 1
-    for s = fromSlot, 16 do
+--- Найти слот в EXTRA_SLOTS с предметом данного id.
+-- @param id ID предмета
+-- @param fromIdx индекс в EXTRA_SLOTS, с которого начинать поиск
+-- @return слот, индекс в EXTRA_SLOTS или nil
+local function findSlotWith(id, fromIdx)
+    fromIdx = fromIdx or 1
+    for i = fromIdx, #EXTRA_SLOTS do
+        local s = EXTRA_SLOTS[i]
         local detail = turtle.getItemDetail(s)
         if detail and detail.name == id then
-            return s
+            return s, i
         end
     end
     return nil
@@ -142,7 +145,6 @@ end
 -- @param crafts сколько крафтов
 -- @return true | false, ошибка
 local function layoutShaped(recipe, crafts)
-    -- Сначала убираем всё из слотов сетки в 13-16
     local cok, cerr = clearCraftingGrid()
     if not cok then return false, cerr end
     
@@ -153,27 +155,19 @@ local function layoutShaped(recipe, crafts)
         local targetId = cell and (type(cell) == "table" and cell.id or cell)
         if targetId then
             local need = crafts
-            local searchFrom = 1
+            local searchFromIdx = 1
             local gridSlot = GRID[i]
             while need > 0 do
-                local s = findSlotWith(targetId, searchFrom)
+                local s, sIdx = findSlotWith(targetId, searchFromIdx)
                 if not s then
                     return false, "ingredient not found in turtle inventory: " .. lang.localize(targetId)
                 end
-                if s == gridSlot then
-                    local detail = turtle.getItemDetail(s)
-                    local existing = detail and detail.count or 0
-                    local take = math.min(need, existing)
-                    need = need - take
-                    searchFrom = s + 1
-                else
-                    local detail = turtle.getItemDetail(s)
-                    local take = math.min(need, detail.count)
-                    turtle.select(s)
-                    turtle.transferTo(gridSlot, take)
-                    need = need - take
-                    searchFrom = s + 1
-                end
+                local detail = turtle.getItemDetail(s)
+                local take = math.min(need, detail.count)
+                turtle.select(s)
+                turtle.transferTo(gridSlot, take)
+                need = need - take
+                searchFromIdx = sIdx + 1
             end
         end
     end
@@ -196,27 +190,19 @@ local function layoutShapeless(recipe, crafts)
         if need > 64 then
             return false, "too many " .. lang.localize(ing.id) .. " (" .. need .. ">64)"
         end
-        local searchFrom = 1
+        local searchFromIdx = 1
         local gridSlot = GRID[idx]
         while need > 0 do
-            local s = findSlotWith(ing.id, searchFrom)
+            local s, sIdx = findSlotWith(ing.id, searchFromIdx)
             if not s then
                 return false, "ingredient not found in turtle inventory: " .. lang.localize(ing.id)
             end
-            if s == gridSlot then
-                local detail = turtle.getItemDetail(s)
-                local existing = detail and detail.count or 0
-                local take = math.min(need, existing)
-                need = need - take
-                searchFrom = s + 1
-            else
-                local detail = turtle.getItemDetail(s)
-                local take = math.min(need, detail.count)
-                turtle.select(s)
-                turtle.transferTo(gridSlot, take)
-                need = need - take
-                searchFrom = s + 1
-            end
+            local detail = turtle.getItemDetail(s)
+            local take = math.min(need, detail.count)
+            turtle.select(s)
+            turtle.transferTo(gridSlot, take)
+            need = need - take
+            searchFromIdx = sIdx + 1
         end
         idx = idx + 1
     end
@@ -330,7 +316,7 @@ function worker:craft(recipe, count)
         -- 4. Move result out of slot 1 to a non-grid slot
         if turtle.getItemCount(1) > 0 then
             local moved = false
-            for _, dst in ipairs({4, 8, 12, 13, 14, 15, 16}) do
+            for _, dst in ipairs(EXTRA_SLOTS) do
                 local detail = turtle.getItemDetail(dst)
                 local resDetail = turtle.getItemDetail(1)
                 if not detail or (resDetail and detail.name == resDetail.name and turtle.getItemSpace(dst) > 0) then

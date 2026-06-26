@@ -102,20 +102,20 @@ end
 function machines:refreshStations(peripherals)
     self.names = {}
     local localMachines = peripherals and peripherals.machines or {}
+    local added = {}
     
-    -- Use manual configuration if present
     if #localMachines > 0 then
         for _, name in ipairs(localMachines) do
             if peripheral.isPresent(name) then
                 table.insert(self.names, name)
+                added[name] = true
             end
         end
-        return
     end
     
-    -- Auto-detect all stations
+    -- Auto-detect all other stations
     for _, name in ipairs(peripheral.getNames()) do
-        if self:isStation(name) then
+        if not added[name] and self:isStation(name) then
             table.insert(self.names, name)
         end
     end

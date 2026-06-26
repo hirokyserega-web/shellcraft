@@ -150,6 +150,8 @@ function config.resolve(cfg)
     -- 1. Сначала разрешаем машины
     local manualMachines = cfg.peripherals and cfg.peripherals.machines
     local machinesSet = {}
+    
+    -- Всегда добавляем ручные машины
     if manualMachines and #manualMachines > 0 then
         for _, name in ipairs(manualMachines) do
             if peripheral.isPresent(name) then
@@ -157,8 +159,11 @@ function config.resolve(cfg)
                 machinesSet[name] = true
             end
         end
-    else
-        for _, name in ipairs(auto.machines or {}) do
+    end
+    
+    -- Всегда добавляем также автоопределённые машины
+    for _, name in ipairs(auto.machines or {}) do
+        if not machinesSet[name] then
             table.insert(result.machines, name)
             machinesSet[name] = true
         end

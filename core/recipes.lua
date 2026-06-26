@@ -266,8 +266,8 @@ function recipes:learnFromStorage(invName)
     local outputItem = nil
     local hasRecipeItems = false
     
-    if size <= 27 then
-        -- Простой режим: слоты 1-9 = 3x3 сетка
+    if size < 27 then
+        -- Simple mode: slots 1-9 = 3x3 grid
         for slot = 1, math.min(9, size) do
             local item = inventoryList[slot]
             if item then
@@ -504,8 +504,8 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
     
     local hasRecipeItems = false
     
-    if storageSize <= 27 then
-        -- Простой режим: слоты 1-9 = 3x3 сетка
+    if storageSize < 27 then
+        -- Simple mode: slots 1-9 = 3x3 grid
         for slot = 1, math.min(9, storageSize) do
             local item = storageList[slot]
             if item then

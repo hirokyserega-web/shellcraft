@@ -832,8 +832,8 @@ function ui:wizardNext(wRows)
     local st = self.state.recipes
     local recipes = self.deps.recipes
     local selectedVal = wRows[st.wizardSelected or 1]
-    local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
-    if not selectedVal and not isLastStep then return end
+    
+    if not selectedVal then return end
     
     if st.wizardStep == 1 then
         st.learnType = st.wizardSelected or 1
@@ -842,24 +842,32 @@ function ui:wizardNext(wRows)
         st.wizardScroll = 0
     elseif st.wizardStep == 2 then
         st.tempStorage = selectedVal
-        if st.learnType == 1 then
-            local ok, recipe = recipes:learnFromStorage(selectedVal)
-            if ok then
-                self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
-                self:addLog("Static recipe learned: " .. recipe.id)
-                st.mode = "saved_dialog"
-                st.savedRecipe = recipe
-            else
-                self:showToast(tostring(recipe), "danger")
-                st.mode = "list"
-            end
-        else
-            st.wizardStep = 3
-            st.wizardSelected = 1
-            st.wizardScroll = 0
-        end
+        st.wizardStep = 3
+        st.wizardSelected = 1
+        st.wizardScroll = 0
     elseif st.wizardStep == 3 then
-        if st.learnType == 2 then
+        if st.learnType == 1 then
+            if st.wizardSelected == 1 then
+                -- Crafting (turtle)
+                self:showToast("Reading chest...", "info")
+                local ok, recipe = recipes:learnFromStorage(st.tempStorage, "shaped")
+                if ok then
+                    self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
+                    self:addLog("Static recipe learned: " .. recipe.id)
+                    st.mode = "saved_dialog"
+                    st.savedRecipe = recipe
+                else
+                    self:showToast(tostring(recipe), "danger")
+                    st.mode = "list"
+                end
+            else
+                -- Machine (furnace/processor)
+                st.tempRecipeType = "machine"
+                st.wizardStep = 4
+                st.wizardSelected = 1
+                st.wizardScroll = 0
+            end
+        elseif st.learnType == 2 then
             st.tempMachine = selectedVal
             self:showToast("Machine processing...", "info")
             local ok, recipe = recipes:activeLearnMachine(st.tempStorage, selectedVal)
@@ -888,6 +896,20 @@ function ui:wizardNext(wRows)
                 end
             else
                 self:showToast("Invalid worker selected", "danger")
+                st.mode = "list"
+            end
+        end
+    elseif st.wizardStep == 4 then
+        if st.learnType == 1 and st.tempRecipeType == "machine" then
+            self:showToast("Reading chest...", "info")
+            local ok, recipe = recipes:learnFromStorage(st.tempStorage, "machine", selectedVal)
+            if ok then
+                self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
+                self:addLog("Static machine recipe learned: " .. recipe.id)
+                st.mode = "saved_dialog"
+                st.savedRecipe = recipe
+            else
+                self:showToast(tostring(recipe), "danger")
                 st.mode = "list"
             end
         end
@@ -981,10 +1003,21 @@ function ui:renderRecipes(yTop, yBot, w)
         widgets.clearArea(startX, yTop, wRight, h)
         
         if st.mode == "learn_select" then
+            -- Determine step titles and rows
+            local maxStep = 3
+            if st.learnType == 1 then
+                if st.wizardStep >= 3 and st.tempRecipeType == "machine" then
+                    maxStep = 4
+                else
+                    maxStep = 3
+                end
+            end
+            
             local titles = {
-                [1] = "1/3 Mode",
-                [2] = "2/3 Grid Chest",
-                [3] = (st.learnType == 2) and "3/3 Machine" or "3/3 Worker"
+                [1] = "1/"..maxStep.." Mode",
+                [2] = "2/"..maxStep.." Grid Chest",
+                [3] = (st.learnType == 1) and "3/"..maxStep.." Recipe Type" or ((st.learnType == 2) and "3/3 Machine" or "3/3 Worker"),
+                [4] = "4/4 Machine Type",
             }
             widgets.text(startX, yTop, titles[st.wizardStep or 1], colors.cyan, colors.black)
             
@@ -1006,7 +1039,9 @@ function ui:renderRecipes(yTop, yBot, w)
                     end
                 end
             elseif st.wizardStep == 3 then
-                if st.learnType == 2 then
+                if st.learnType == 1 then
+                    wRows = { "Crafting (turtle)", "Machine (furnace/processor)" }
+                elseif st.learnType == 2 then
                     if self.deps.machines then
                         for _, name in ipairs(self.deps.machines.names) do
                             table.insert(wRows, name)
@@ -1020,6 +1055,22 @@ function ui:renderRecipes(yTop, yBot, w)
                         end
                     end
                 end
+            elseif st.wizardStep == 4 then
+                if st.learnType == 1 and st.tempRecipeType == "machine" then
+                    local types = {}
+                    local typeSet = { ["furnace"] = true }
+                    table.insert(types, "furnace")
+                    if self.deps.machines then
+                        for _, mname in ipairs(self.deps.machines.names) do
+                            local ptype = peripheral.getType(mname)
+                            if ptype and not typeSet[ptype] then
+                                typeSet[ptype] = true
+                                table.insert(types, ptype)
+                            end
+                        end
+                    end
+                    wRows = types
+                end
             end
             
             local wizardState = { scroll = st.wizardScroll, selected = st.wizardSelected }
@@ -1032,7 +1083,15 @@ function ui:renderRecipes(yTop, yBot, w)
             -- Кнопки мастера (динамический расчет ширины для исключения перекрытия)
             local label1 = "Back"
             local label2 = "Cancel"
-            local label3 = (st.wizardStep == 3 or (st.wizardStep == 2 and st.learnType == 1)) and "Record" or "Next"
+            
+            local isLastStep = false
+            if st.wizardStep == maxStep then
+                isLastStep = true
+            elseif st.learnType == 1 and st.wizardStep == 3 and st.wizardSelected == 1 then
+                isLastStep = true
+            end
+            
+            local label3 = isLastStep and "Record" or "Next"
             
             local w1 = #label1 + 2
             local w2 = #label2 + 2
@@ -1041,7 +1100,7 @@ function ui:renderRecipes(yTop, yBot, w)
             if w1 + w2 + w3 + 2 > wRight then
                 label1 = "Bk"
                 label2 = "Can"
-                label3 = (label3 == "Record") and "Rec" or "Nxt"
+                label3 = isLastStep and "Rec" or "Nxt"
                 w1 = #label1 + 2
                 w2 = #label2 + 2
                 w3 = #label3 + 2

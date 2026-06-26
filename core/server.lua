@@ -63,6 +63,12 @@ function server.run()
                 uiInstance:showToast("Done: " .. name .. (payload and payload.count and (" x" .. payload.count) or ""), "success")
             elseif etype == "task_failed" then
                 uiInstance:taskFailed(payload and payload.error)
+                local errStr = payload and tostring(payload.error) or ""
+                if errStr:find("No matching recipe", 1, true) or errStr:find("rejected", 1, true) then
+                    local taskRec = disp.tasks[payload.id] and disp.tasks[payload.id].recipe
+                    local recId = taskRec and taskRec.id or "?"
+                    uiInstance:addLog("Hint: Recipe " .. recId .. " may be a MACHINE/mod recipe - re-learn it as Machine, not Crafting.")
+                end
             elseif etype == "task_timeout" then
                 local reason = payload and payload.reason or "unknown"
                 local wStr = payload and payload.worker or "?"

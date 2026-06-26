@@ -245,7 +245,7 @@ end
 -- Любой предмет вне колонок сетки крафта (или ниже 3 ряда) считается результатом.
 -- @param invName имя периферии хранилища
 -- @return true, recipe | false, ошибка
-function recipes:learnFromStorage(invName)
+function recipes:learnFromStorage(invName, recipeType, machineType)
     local p = peripheral.wrap(invName)
     if not p
        or type(p.list) ~= "function"
@@ -347,13 +347,41 @@ function recipes:learnFromStorage(invName)
         end
     end
     
-    local recipe = {
-        id = outputItem.name,
-        name = displayName or outputItem.name,
-        type = "shaped",
-        output = outputItem.count or 1,
-        pattern = pattern,
-    }
+    local recipe
+    if recipeType == "machine" then
+        -- Aggregate pattern slots into inputs
+        local agg = {}
+        for r = 1, 3 do
+            for c = 1, 3 do
+                local item = pattern[r][c]
+                if item and item.id then
+                    agg[item.id] = (agg[item.id] or 0) + (item.count or 1)
+                end
+            end
+        end
+        local input = {}
+        for id, count in pairs(agg) do
+            table.insert(input, { id = id, count = count })
+        end
+        table.sort(input, function(a, b) return a.id < b.id end)
+        
+        recipe = {
+            id = outputItem.name,
+            name = displayName or outputItem.name,
+            type = "machine",
+            machine = machineType or "furnace",
+            input = input,
+            output = outputItem.count or 1,
+        }
+    else
+        recipe = {
+            id = outputItem.name,
+            name = displayName or outputItem.name,
+            type = "shaped",
+            output = outputItem.count or 1,
+            pattern = pattern,
+        }
+    end
     
     self:add(recipe)
     return true, recipe

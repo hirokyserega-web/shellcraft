@@ -56,26 +56,72 @@ end
 
 local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
 
+--- Попытаться сбросить предмет во внешний инвентарь (соседний или на сети).
+local function dropToExternal(slot)
+    turtle.select(slot)
+    if turtle.drop() then return true end
+    if turtle.dropUp() then return true end
+    if turtle.dropDown() then return true end
+    
+    local inv = peripheral.find("inventory")
+    if inv then
+        local modem = peripheral.find("modem")
+        if modem then
+            local myName = modem.getNameLocal()
+            if myName then
+                local ok, moved = pcall(inv.pullItems, myName, slot)
+                if ok and moved and moved > 0 then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
 --- Очистить инвентарь черепахи (вернуть всё из слотов сетки в слоты 13-16).
 local function clearCraftingGrid()
+    local extraSlots = {13, 14, 15, 16}
     for _, s in ipairs(GRID) do
         if turtle.getItemCount(s) > 0 then
-            -- ищем свободный слот 13-16
-            for dst = 13, 16 do
-                if turtle.getItemSpace(dst) > 0 then
-                    turtle.select(s)
-                    local detail = turtle.getItemDetail(s)
-                    local dstDetail = turtle.getItemDetail(dst)
-                    -- только если тот же тип или пусто
-                    if not dstDetail or (detail and dstDetail.name == detail.name) then
+            -- 1. Try to transfer to slots 13-16
+            local item = turtle.getItemDetail(s)
+            if item then
+                for _, dst in ipairs(extraSlots) do
+                    local dstItem = turtle.getItemDetail(dst)
+                    if not dstItem or (dstItem.name == item.name and turtle.getItemSpace(dst) > 0) then
+                        turtle.select(s)
                         turtle.transferTo(dst)
                         if turtle.getItemCount(s) == 0 then break end
                     end
                 end
             end
+            
+            -- 2. If still has items, try to drop to external inventory
+            if turtle.getItemCount(s) > 0 then
+                dropToExternal(s)
+            end
+            
+            -- 3. If still has items, return error
+            if turtle.getItemCount(s) > 0 then
+                local detail = turtle.getItemDetail(s)
+                local name = detail and detail.name or "unknown item"
+                return false, "cannot clear crafting grid: slot " .. s .. " still has " .. name .. " (inventory full)"
+            end
         end
     end
+    
+    -- Verify grid is empty
+    for _, s in ipairs(GRID) do
+        if turtle.getItemCount(s) > 0 then
+            local detail = turtle.getItemDetail(s)
+            local name = detail and detail.name or "unknown item"
+            return false, "cannot clear crafting grid: slot " .. s .. " still has " .. name .. " (verification failed)"
+        end
+    end
+    
     turtle.select(1)
+    return true
 end
 
 --- Найти слот 1-16 с предметом данного id.
@@ -97,7 +143,9 @@ end
 -- @return true | false, ошибка
 local function layoutShaped(recipe, crafts)
     -- Сначала убираем всё из слотов сетки в 13-16
-    clearCraftingGrid()
+    local cok, cerr = clearCraftingGrid()
+    if not cok then return false, cerr end
+    
     for i = 1, 9 do
         local row = math.ceil(i / 3)
         local col = ((i - 1) % 3) + 1
@@ -136,7 +184,9 @@ end
 --- Разложить ингредиенты для shapeless рецепта (любые слоты сетки).
 -- Каждый ингредиент — в свой слот, количество = crafts * ing.count.
 local function layoutShapeless(recipe, crafts)
-    clearCraftingGrid()
+    local cok, cerr = clearCraftingGrid()
+    if not cok then return false, cerr end
+    
     local idx = 1
     for _, ing in ipairs(recipe.ingredients or {}) do
         if idx > 9 then
@@ -174,9 +224,59 @@ local function layoutShapeless(recipe, crafts)
     return true
 end
 
---- Сложить весь результат в слоты 10-16 и оставить слот 1 с результатом.
--- На самом деле просто считаем, что после craft результат в слоте 1.
--- Core заберёт всё. Ничего не делаем.
+--- Проверить соответствие предметов в сетке рецепту.
+local function verifyGridMatches(recipe)
+    if recipe.type == "shaped" then
+        for i = 1, 9 do
+            local row = math.ceil(i / 3)
+            local col = ((i - 1) % 3) + 1
+            local cell = recipe.pattern[row] and recipe.pattern[row][col]
+            local expectedId = cell and (type(cell) == "table" and cell.id or cell)
+            
+            local gridSlot = GRID[i]
+            local detail = turtle.getItemDetail(gridSlot)
+            local actualId = detail and detail.name
+            
+            if expectedId then
+                if not actualId then
+                    return false, "grid mismatch at slot " .. gridSlot .. ": got empty, expected " .. expectedId
+                elseif actualId ~= expectedId then
+                    return false, "grid mismatch at slot " .. gridSlot .. ": got " .. actualId .. ", expected " .. expectedId
+                end
+            else
+                if actualId then
+                    return false, "grid mismatch at slot " .. gridSlot .. ": got " .. actualId .. ", expected empty"
+                end
+            end
+        end
+    else
+        -- Shapeless
+        local expected = {}
+        for idx, ing in ipairs(recipe.ingredients or {}) do
+            expected[idx] = ing.id
+        end
+        
+        for i = 1, 9 do
+            local gridSlot = GRID[i]
+            local detail = turtle.getItemDetail(gridSlot)
+            local actualId = detail and detail.name
+            local expectedId = expected[i]
+            
+            if expectedId then
+                if not actualId then
+                    return false, "grid mismatch at slot " .. gridSlot .. ": got empty, expected " .. expectedId
+                elseif actualId ~= expectedId then
+                    return false, "grid mismatch at slot " .. gridSlot .. ": got " .. actualId .. ", expected " .. expectedId
+                end
+            else
+                if actualId then
+                    return false, "grid mismatch at slot " .. gridSlot .. ": got " .. actualId .. ", expected empty"
+                end
+            end
+        end
+    end
+    return true
+end
 
 --- Выполнить один крафт.
 -- @param recipe рецепт
@@ -195,31 +295,59 @@ function worker:craft(recipe, count)
 
     local t0 = os.epoch("utc")
     local totalCrafted = 0
-    local remainingCrafts = crafts
 
-    while remainingCrafts > 0 do
-        local chunk = math.min(64, remainingCrafts)
-        -- Layout
-        local ok, err
-        if recipe.type == "shaped" then
-            ok, err = layoutShaped(recipe, chunk)
-        else
-            ok, err = layoutShapeless(recipe, chunk)
+    for n = 1, crafts do
+        -- 1. Layout 1 craft worth of ingredients
+        local lok, lerr = (recipe.type == "shaped") and layoutShaped(recipe, 1) or layoutShapeless(recipe, 1)
+        if not lok then
+            self.crafting = false
+            return false, lerr
         end
+        
+        -- 2. Verify grid matches exactly
+        local vok, verr = verifyGridMatches(recipe)
+        if not vok then
+            self.crafting = false
+            return false, verr
+        end
+        
+        -- 3. Perform 1 craft
+        turtle.select(1)
+        local ok, reason = turtle.craft(1)
         if not ok then
             self.crafting = false
-            return false, err
+            -- Dump current grid contents for diagnosis
+            local dump = {}
+            for _, s in ipairs(GRID) do
+                local d = turtle.getItemDetail(s)
+                if d then dump[#dump+1] = "slot" .. s .. "=" .. d.name .. "x" .. d.count end
+            end
+            local gridStr = #dump > 0 and table.concat(dump, ", ") or "empty"
+            return false, "turtle.craft rejected step " .. n .. "/" .. crafts ..
+                " (recipe " .. tostring(recipe.id) .. "): " .. tostring(reason) .. " | grid: " .. gridStr
         end
-
-        -- Craft
-        turtle.select(1)
-        local success = turtle.craft(chunk)
-        if not success then
-            self.crafting = false
-            return false, "turtle.craft failed for chunk " .. chunk
+        
+        -- 4. Move result out of slot 1 to a non-grid slot
+        if turtle.getItemCount(1) > 0 then
+            local moved = false
+            for _, dst in ipairs({4, 8, 12, 13, 14, 15, 16}) do
+                local detail = turtle.getItemDetail(dst)
+                local resDetail = turtle.getItemDetail(1)
+                if not detail or (resDetail and detail.name == resDetail.name and turtle.getItemSpace(dst) > 0) then
+                    turtle.select(1)
+                    if turtle.transferTo(dst) then
+                        moved = true
+                        break
+                    end
+                end
+            end
+            if not moved then
+                self.crafting = false
+                return false, "failed to move crafted item from slot 1 to non-grid slots (inventory full)"
+            end
         end
-        totalCrafted = totalCrafted + chunk * output
-        remainingCrafts = remainingCrafts - chunk
+        
+        totalCrafted = totalCrafted + output
     end
 
     local t1 = os.epoch("utc")

@@ -224,6 +224,18 @@ function dispatcher:prepareIngredients(workerId, task)
             return false, errMsg
         end
     end
+    -- Log final turtle inventory snapshot for diagnosis
+    local invOk, invList = pcall(p.list)
+    if invOk and invList then
+        local snapshot = {}
+        for slot, item in pairs(invList) do
+            if item and item.name then
+                table.insert(snapshot, "slot" .. slot .. "=" .. item.name .. "x" .. item.count)
+            end
+        end
+        local snapStr = #snapshot > 0 and table.concat(snapshot, ", ") or "empty"
+        util.info("Turtle #" .. tostring(workerId) .. " inventory snapshot: " .. snapStr)
+    end
     return true
 end
 

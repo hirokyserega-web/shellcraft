@@ -59,6 +59,19 @@ function fluids:resolvePool(peripherals)
         dankSet[dk.periph] = true
     end
 
+    -- Также исключаем default dank из настроек
+    local mainCfg = {}
+    if fs.exists("config.dat") then
+        local f = fs.open("config.dat", "r")
+        if f then
+            mainCfg = textutils.unserialize(f.readAll()) or {}
+            f.close()
+        end
+    end
+    if mainCfg.grid_dank then
+        dankSet[mainCfg.grid_dank] = true
+    end
+
     -- Если есть ручное переопределение общего пула
     if self.manual_pool and #self.manual_pool > 0 then
         for _, name in ipairs(self.manual_pool) do
@@ -82,8 +95,9 @@ function fluids:resolvePool(peripherals)
             end
 
             if not isItemStorage then
-                local hasFluid = peripheral.hasType(name, "fluid_storage")
-                local hasInv = peripheral.hasType(name, "inventory") or (wrap(name) and wrap(name).list ~= nil)
+                local p = wrap(name)
+                local hasFluid = peripheral.hasType(name, "fluid_storage") or (p and type(p.tanks) == "function")
+                local hasInv = peripheral.hasType(name, "inventory") or (p and p.list ~= nil)
                 
                 -- Если это чисто бак (есть жидкость, но нет инвентаря)
                 if hasFluid and not hasInv then

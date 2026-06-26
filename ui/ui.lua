@@ -6,6 +6,26 @@
 local ui = {}
 ui.__index = ui
 
+local function formatPeriphName(name)
+    local ptype = peripheral.getType(name) or "unknown"
+    if ptype:find(":") then
+        ptype = ptype:match(":(.+)$")
+    end
+    return string.format("%s (%s)", name, ptype)
+end
+
+local function prettyModName(mod)
+    if mod == "all" then return "All" end
+    if mod == "minecraft" then return "MC" end
+    if mod == "create" then return "Create" end
+    if mod == "industrialupgrade" then return "IU" end
+    if #mod > 8 then
+        return mod:sub(1, 1):upper() .. mod:sub(2, 7) .. "."
+    else
+        return mod:sub(1, 1):upper() .. mod:sub(2)
+    end
+end
+
 --- Создать UI.
 function ui.new(monitor, deps)
     local self = setmetatable({}, ui)
@@ -762,7 +782,8 @@ function ui:renderStorageFluids(yTop, yBot, w)
                 end
             end
             if not isItemStorage and not isMachine and not isPool then
-                if peripheral.hasType(name, "fluid_storage") then
+                local p = peripheral.wrap(name)
+                if peripheral.hasType(name, "fluid_storage") or (p and type(p.tanks) == "function") then
                     table.insert(unassigned, name)
                 end
             end
@@ -781,9 +802,28 @@ function ui:renderStorageFluids(yTop, yBot, w)
         })
     end
     for _, name in ipairs(unassigned) do
+        local fluidStr = "empty"
+        local p = peripheral.wrap(name)
+        if p and p.tanks then
+            local ok, tks = pcall(p.tanks)
+            if ok and tks then
+                local parts = {}
+                for _, t in ipairs(tks) do
+                    local fName = t.name or t.fluid
+                    local amt = t.amount or 0
+                    if fName and amt > 0 then
+                        table.insert(parts, string.format("%s (%dmB)", util.formatId(fName), amt))
+                    end
+                end
+                if #parts > 0 then
+                    fluidStr = table.concat(parts, ", ")
+                end
+            end
+        end
         table.insert(leftRows, {
             type = "unassigned",
-            name = name
+            name = name,
+            contents = fluidStr
         })
     end
     
@@ -836,7 +876,16 @@ function ui:renderStorageFluids(yTop, yBot, w)
         else
             term.setCursorPos(1, yCurr)
             term.setTextColor(colors.yellow)
-            term.write(widgets.clip("Unassigned dank " .. row.name, wLeft))
+            local label = "Unassigned dank " .. row.name
+            if self.configData.grid_dank == row.name then
+                label = label .. " (Default)"
+            end
+            term.write(widgets.clip(label, wLeft))
+            
+            yCurr = yCurr + 1
+            term.setCursorPos(1, yCurr)
+            term.setTextColor(colors.lightGray)
+            term.write(widgets.clip(" Content: " .. row.contents, wLeft))
             
             yCurr = yCurr + 1
             widgets.button(self, 1, yCurr, 8, "Assign", { kind = "active" }, function()
@@ -1394,6 +1443,12 @@ function ui:wizardNext(wRows)
     
     if not selectedVal then return end
     
+    if (st.wizardStep == 2) or (st.wizardStep == 3 and st.learnType == 2) then
+        if type(selectedVal) == "string" and selectedVal:find("%s%(") then
+            selectedVal = selectedVal:match("^([^%s]+)")
+        end
+    end
+    
     if st.wizardStep == 1 then
         st.learnType = st.wizardSelected or 1
         st.wizardStep = 2
@@ -1481,6 +1536,34 @@ function ui:renderRecipes(yTop, yBot, w)
     local list = recipes:all()
     local h = yBot - yTop + 1
     
+    local modsSet = { all = true }
+    for _, r in ipairs(list) do
+        local mod = r.id:match("^([^:]+):") or "minecraft"
+        modsSet[mod] = true
+    end
+    local mods = { "all" }
+    for m in pairs(modsSet) do
+        if m ~= "all" then
+            table.insert(mods, m)
+        end
+    end
+    table.sort(mods, function(a, b)
+        if a == "all" then return true end
+        if b == "all" then return false end
+        return a < b
+    end)
+    
+    st.selectedMod = st.selectedMod or "all"
+    st.modTabScroll = st.modTabScroll or 1
+    
+    local filteredList = {}
+    for _, r in ipairs(list) do
+        local mod = r.id:match("^([^:]+):") or "minecraft"
+        if st.selectedMod == "all" or mod == st.selectedMod then
+            table.insert(filteredList, r)
+        end
+    end
+    
     if st.mode == "saved_dialog" then
         local r = st.savedRecipe
         if not r then st.mode = "list"; return end
@@ -1526,23 +1609,66 @@ function ui:renderRecipes(yTop, yBot, w)
         local startX = wLeft + 2
         local wRight = w - wLeft - 1
         
+        -- Mod tabs row at yTop
+        local limitW = wLeft - 2
+        local showLeftScroll = st.modTabScroll > 1
+        local showRightScroll = false
+        
+        local startIdx = st.modTabScroll
+        local xOffset = 1
+        if showLeftScroll then
+            widgets.button(self, 1, yTop, 1, "<", { kind = "normal" }, function()
+                st.modTabScroll = math.max(1, st.modTabScroll - 1)
+            end)
+            xOffset = 3
+        end
+        
+        local tabX = xOffset
+        for idx = startIdx, #mods do
+            local mod = mods[idx]
+            local label = prettyModName(mod)
+            local labelW = #label + 2
+            
+            if tabX + labelW > wLeft - 2 and idx < #mods then
+                showRightScroll = true
+                break
+            end
+            if tabX + labelW > wLeft then
+                break
+            end
+            
+            local isSelected = (st.selectedMod == mod)
+            widgets.button(self, tabX, yTop, #label, label, { kind = isSelected and "active" or "normal" }, function()
+                st.selectedMod = mod
+                st.selected = 1
+                st.scroll = 0
+            end)
+            tabX = tabX + #label + 1
+        end
+        
+        if showRightScroll then
+            widgets.button(self, wLeft - 1, yTop, 1, ">", { kind = "normal" }, function()
+                st.modTabScroll = math.min(#mods, st.modTabScroll + 1)
+            end)
+        end
+
         -- Левая колонка: список рецептов
         local rows = {}
-        for _, r in ipairs(list) do
+        for _, r in ipairs(filteredList) do
             local name = self.deps.lang.display(r.id, r.name)
             local typeStr = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
             table.insert(rows, string.format("[%s] %s", typeStr, name))
         end
         
-        widgets.scrollList(self, 1, yTop, wLeft, h - 1, rows, st, function(idx)
+        widgets.scrollList(self, 1, yTop + 1, wLeft, h - 2, rows, st, function(idx)
             st.selected = idx
         end)
         if #rows == 0 then
-            widgets.text(2, yTop + 2, "No recipes", colors.gray, colors.black)
+            widgets.text(2, yTop + 3, "No recipes", colors.gray, colors.black)
         end
         
         widgets.button(self, 1, yBot, 8, "Delete", { kind = "danger" }, function()
-            local r = list[st.selected]
+            local r = filteredList[st.selected]
             if r then
                 recipes:remove(r.id)
                 self:showToast("Deleted recipe", "success")
@@ -1594,7 +1720,7 @@ function ui:renderRecipes(yTop, yBot, w)
                                 if mn == name then isMach = true; break end
                             end
                         end
-                        if not isMach then table.insert(wRows, name) end
+                        if not isMach then table.insert(wRows, formatPeriphName(name)) end
                     end
                 end
             elseif st.wizardStep == 3 then
@@ -1603,7 +1729,7 @@ function ui:renderRecipes(yTop, yBot, w)
                 elseif st.learnType == 2 then
                     if self.deps.machines then
                         for _, name in ipairs(self.deps.machines.names) do
-                            table.insert(wRows, name)
+                            table.insert(wRows, formatPeriphName(name))
                         end
                     end
                 elseif st.learnType == 3 then
@@ -1681,7 +1807,7 @@ function ui:renderRecipes(yTop, yBot, w)
             end)
         else
             -- Режим просмотра рецепта
-            local r = list[st.selected]
+            local r = filteredList[st.selected]
             if r then
                 local displayName = self.deps.lang.display(r.id, r.name)
                 widgets.text(startX, yTop, "Recipe: " .. widgets.clip(displayName, wRight - 8), colors.white, colors.black)
@@ -1690,6 +1816,8 @@ function ui:renderRecipes(yTop, yBot, w)
                 if r.avgTime then
                     widgets.text(startX, yTop + 3, "Avg Time: " .. string.format("%.1fs", r.avgTime), colors.lightGray, colors.black)
                 end
+                local mName = r.id:match("^([^:]+):") or "minecraft"
+                widgets.text(startX, yTop + 4, "Mod: " .. prettyModName(mName), colors.lightGray, colors.black)
                 
                 -- Ингредиенты и жидкости
                 widgets.text(startX, yTop + 5, "Ingredients / Fluids:", colors.cyan, colors.black)
@@ -1811,9 +1939,13 @@ end
 ----------------------------------------------------------------
 function ui:renderSettings(yTop, yBot, w)
     local st = self.state.settings
-    local h = yBot - yTop
+    local h = yBot - yTop + 1
     
-    local rows = {}
+    local wLeft = math.floor(w * 0.48)
+    local startX = wLeft + 2
+    local wRight = w - wLeft - 1
+    
+    -- 1. Сбор инвентарей
     local inventories = {}
     for _, name in ipairs(peripheral.getNames()) do
         local ok, p = pcall(peripheral.wrap, name)
@@ -1829,30 +1961,83 @@ function ui:renderSettings(yTop, yBot, w)
             end
         end
     end
+    table.sort(inventories)
     
-    local currentGrid = self.configData.grid_chest
-    for _, name in ipairs(inventories) do
-        local label = name
-        if name == currentGrid then
-            label = "[*] " .. name .. " (Default)"
-        else
-            label = "[ ] " .. name
+    -- 2. Сбор баков/данков
+    local fluidStorages = {}
+    for _, name in ipairs(peripheral.getNames()) do
+        local ok, p = pcall(peripheral.wrap, name)
+        if ok and p and (peripheral.hasType(name, "fluid_storage") or type(p.tanks) == "function") then
+            table.insert(fluidStorages, name)
         end
-        table.insert(rows, label)
+    end
+    table.sort(fluidStorages)
+    
+    -- Инициализируем scroll/selected под-состояния
+    st.gridState = st.gridState or { scroll = 0, selected = 1 }
+    st.dankState = st.dankState or { scroll = 0, selected = 1 }
+    
+    -- Заполняем строки для левой колонки (сетка крафта)
+    local gridRows = {}
+    local currentGrid = self.configData.grid_chest
+    for idx, name in ipairs(inventories) do
+        local label = formatPeriphName(name)
+        if name == currentGrid then
+            label = "[*] " .. label
+            st.gridState.selected = idx
+        else
+            label = "[ ] " .. label
+        end
+        table.insert(gridRows, label)
     end
     
-    widgets.text(1, yTop, "Choose Crafting Grid Chest:", colors.cyan, colors.black)
+    -- Заполняем строки для правой колонки (данк по умолчанию)
+    local dankRows = {}
+    local currentDank = self.configData.grid_dank
+    for idx, name in ipairs(fluidStorages) do
+        local label = formatPeriphName(name)
+        if name == currentDank then
+            label = "[*] " .. label
+            st.dankState.selected = idx
+        else
+            label = "[ ] " .. label
+        end
+        table.insert(dankRows, label)
+    end
     
-    if #rows == 0 then
-        widgets.center(math.floor((yTop + yBot) / 2), "No chests found", colors.gray)
+    -- Отрисовка левой колонки
+    widgets.text(1, yTop, "Crafting Grid Chest:", colors.cyan, colors.black)
+    if #gridRows == 0 then
+        widgets.text(1, yTop + 2, "No chests found", colors.gray, colors.black)
     else
-        widgets.scrollList(self, 1, yTop + 1, w, h, rows, st, function(idx)
-            st.selected = idx
+        widgets.scrollList(self, 1, yTop + 1, wLeft, h - 1, gridRows, st.gridState, function(idx)
             local selectedChest = inventories[idx]
             self.configData.grid_chest = selectedChest
             config.save(self.configData)
             self:addLog("Default grid chest: " .. selectedChest)
             self:showToast("Saved default grid chest", "success")
+        end)
+    end
+    
+    -- Вертикальный разделитель
+    term.setBackgroundColor(colors.black)
+    for cy = yTop, yBot do
+        term.setCursorPos(wLeft + 1, cy)
+        term.setTextColor(colors.gray)
+        term.write("|")
+    end
+    
+    -- Отрисовка правой колонки
+    widgets.text(startX, yTop, "Default Dank (Tank):", colors.cyan, colors.black)
+    if #dankRows == 0 then
+        widgets.text(startX, yTop + 2, "No tanks found", colors.gray, colors.black)
+    else
+        widgets.scrollList(self, startX, yTop + 1, wRight, h - 1, dankRows, st.dankState, function(idx)
+            local selectedDank = fluidStorages[idx]
+            self.configData.grid_dank = selectedDank
+            config.save(self.configData)
+            self:addLog("Default dank: " .. selectedDank)
+            self:showToast("Saved default dank", "success")
         end)
     end
 end

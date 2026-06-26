@@ -12,6 +12,7 @@ function worker.new()
     local self = setmetatable({}, worker)
     self.core_id = nil
     self.crafting = false
+    self.current_task_id = nil  -- task ID currently being worked on (for heartbeat matching)
     self.canCraft = true  -- set to false if turtle lacks crafting table
     return self
 end
@@ -276,11 +277,16 @@ function worker:run()
             elseif msg.type == net.MSG.CRAFT_REQUEST then
                 local p = msg.payload or {}
                 self.core_id = senderId
+                -- Set busy flag IMMEDIATELY before any work (prevents stale heartbeat race)
+                self.crafting = true
+                self.current_task_id = p.task_id
                 -- Wrap entire CRAFT_REQUEST handling in pcall to prevent silent crashes
                 local handlerOk, handlerErr = pcall(function()
                     util.info("Craft task: " .. tostring(p.recipe and p.recipe.id) .. " x" .. tostring(p.count))
                     -- Check if this turtle can craft
                     if not self.canCraft then
+                        self.crafting = false
+                        self.current_task_id = nil
                         self:sendResult(p.task_id, false, {
                             task_id = p.task_id,
                             success = false,
@@ -292,9 +298,10 @@ function worker:run()
                     self:sendStatus(p.task_id, 0, "starting")
                     -- pcall around craft() to catch any runtime errors
                     local craftOk, ok, res, elapsed, crafts = pcall(self.craft, self, p.recipe, p.count)
+                    self.crafting = false
+                    self.current_task_id = nil
                     if not craftOk then
                         -- craft() itself threw an error (crash)
-                        self.crafting = false
                         local errText = "Worker crash in craft(): " .. tostring(ok)
                         self:sendResult(p.task_id, false, {
                             task_id = p.task_id,
@@ -326,6 +333,7 @@ function worker:run()
                 if not handlerOk then
                     -- Outer pcall caught an error in the handler itself
                     self.crafting = false
+                    self.current_task_id = nil
                     local errText = "Worker crash handling CRAFT_REQUEST: " .. tostring(handlerErr)
                     pcall(function()
                         self:sendResult(p.task_id, false, {
@@ -381,7 +389,7 @@ function worker:run()
         -- Heartbeat Core или трансляция присутствия раз в 10 сек
         if os.clock() - lastBeat > 10 then
             if self.core_id then
-                net.send(self.core_id, net.MSG.HEARTBEAT, { id = os.getComputerID(), busy = self.crafting })
+                net.send(self.core_id, net.MSG.HEARTBEAT, { id = os.getComputerID(), busy = self.crafting, current_task_id = self.current_task_id })
             else
                 self:sayHello(nil)
             end

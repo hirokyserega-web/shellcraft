@@ -35,6 +35,7 @@ function server.run()
     disp.machines = mach
     disp.recipes = rec
     if cfg.task_timeout then disp.task_timeout = cfg.task_timeout end
+    if cfg.heartbeat_grace then disp.heartbeat_grace = cfg.heartbeat_grace end
 
     -- 4. Связь событий -> UI + лог + прогресс
     local uiInstance = nil

@@ -478,13 +478,8 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
         return false, "turtle worker is not attached to the wired modem network"
     end
     local pTurtle = peripheral.wrap(turtleName)
-    if not pTurtle
-       or type(pTurtle.list) ~= "function"
-       or type(pTurtle.pushItems) ~= "function"
-       or type(pTurtle.pullItems) ~= "function" then
-       return false, "Turtle #"..tostring(workerId).." is not reachable as an "
-         .."inventory. Connect the turtle to a WIRED modem and ENABLE it "
-         .."(right-click, it must glow red). A wireless modem is not enough."
+    if not pTurtle then
+       return false, "Turtle #"..tostring(workerId).." is not reachable. Connect the turtle to a WIRED modem and ENABLE it (right-click the modem, it must glow red)."
     end
     
     -- 1. Читаем раскладку из сундука
@@ -558,11 +553,8 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
     end
     
     -- Очищаем черепаху в сундук
-    local turtleList = pTurtle.list()
     for s = 1, 16 do
-        if turtleList[s] then
-            pStorage.pullItems(turtleName, s)
-        end
+        pStorage.pullItems(turtleName, s)
     end
     
     -- Раскладываем ингредиенты
@@ -570,11 +562,8 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
         local pushed = pStorage.pushItems(turtleName, trans.srcSlot, 1, trans.dstSlot)
         if pushed == 0 then
             -- Возврат в случае ошибки
-            local currentTurtleList = pTurtle.list()
             for s = 1, 16 do
-                if currentTurtleList[s] then
-                    pStorage.pullItems(turtleName, s)
-                end
+                pStorage.pullItems(turtleName, s)
             end
             return false, "could not transfer ingredients to turtle slots"
         end
@@ -596,31 +585,22 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
     end
     
     if not responseMsg then
-        local currentTurtleList = pTurtle.list()
         for s = 1, 16 do
-            if currentTurtleList[s] then
-                pStorage.pullItems(turtleName, s)
-            end
+            pStorage.pullItems(turtleName, s)
         end
         return false, "timeout waiting for turtle craft response"
     end
     
     if not responseMsg.success then
-        local currentTurtleList = pTurtle.list()
         for s = 1, 16 do
-            if currentTurtleList[s] then
-                pStorage.pullItems(turtleName, s)
-            end
+            pStorage.pullItems(turtleName, s)
         end
         return false, tostring(responseMsg.error)
     end
     
     -- Забираем все предметы (результат и остатки) назад в сундук
-    local finalTurtleList = pTurtle.list()
     for s = 1, 16 do
-        if finalTurtleList[s] then
-            pStorage.pullItems(turtleName, s)
-        end
+        pStorage.pullItems(turtleName, s)
     end
     
     local recipe = {

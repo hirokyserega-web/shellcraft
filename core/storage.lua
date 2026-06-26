@@ -126,67 +126,124 @@ end
 -- @return сколько перемещено
 function storage:deposit(sourcePeripheral, sourceSlot, count)
     local src = wrap(sourcePeripheral)
-    if not src or not src.getItemDetail then return 0 end
-    local ok, detail = pcall(src.getItemDetail, sourceSlot)
-    if not ok or not detail then return 0 end
-    local toMove = count or detail.count or 0
-    local id = detail.name
-    local moved = 0
-
-    -- 1. Try to deposit into existing slots of the same item ID
-    if self.cache[id] and self.cache[id].locations then
-        for _, loc in ipairs(self.cache[id].locations) do
-            if toMove <= 0 then break end
-            local p = wrap(loc.p)
-            if p then
-                local ok2, n = false, 0
-                if p.pullItems then
-                    ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
-                end
-                if not ok2 or not n or n == 0 then
-                    -- Fallback: push from source peripheral
-                    if src.pushItems then
-                        ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
-                    end
-                end
-                if ok2 and n and n > 0 then
-                    moved = moved + n
-                    toMove = toMove - n
-                    loc.qty = loc.qty + n
-                end
-            end
+    local id, toMove
+    local hasGetItemDetail = src and type(src.getItemDetail) == "function"
+    
+    if hasGetItemDetail then
+        local ok, detail = pcall(src.getItemDetail, sourceSlot)
+        if ok and detail then
+            id = detail.name
+            toMove = count or detail.count or 0
         end
     end
 
-    -- 2. If there are still items left to move, find empty slots
-    if toMove > 0 then
+    local moved = 0
+
+    if id and toMove and toMove > 0 then
+        -- 1. Try to deposit into existing slots of the same item ID
+        if self.cache[id] and self.cache[id].locations then
+            for _, loc in ipairs(self.cache[id].locations) do
+                if toMove <= 0 then break end
+                local p = wrap(loc.p)
+                if p then
+                    local ok2, n = false, 0
+                    if p.pullItems then
+                        ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
+                    end
+                    if not ok2 or not n or n == 0 then
+                        -- Fallback: push from source peripheral
+                        if src and src.pushItems then
+                            ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
+                        end
+                    end
+                    if ok2 and n and n > 0 then
+                        moved = moved + n
+                        toMove = toMove - n
+                        loc.qty = loc.qty + n
+                    end
+                end
+            end
+        end
+
+        -- 2. If there are still items left to move, find empty slots
+        if toMove > 0 then
+            for _, name in ipairs(self.names) do
+                if toMove <= 0 then break end
+                local p = wrap(name)
+                if p and p.size and p.list then
+                    local sz = p.size()
+                    local list = p.list()
+                    for s = 1, sz do
+                        if toMove <= 0 then break end
+                        if not list[s] then
+                            -- This slot is empty
+                            local ok2, n = false, 0
+                            if p.pullItems then
+                                ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, s)
+                            end
+                            if not ok2 or not n or n == 0 then
+                                -- Fallback: push from source peripheral
+                                if src and src.pushItems then
+                                    ok2, n = pcall(src.pushItems, name, sourceSlot, toMove, s)
+                                end
+                            end
+                            if ok2 and n and n > 0 then
+                                moved = moved + n
+                                toMove = toMove - n
+                                if not self.cache[id] then
+                                    self.cache[id] = { total = 0, locations = {} }
+                                end
+                                table.insert(self.cache[id].locations, { p = name, s = s, qty = n })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 3. Update the total cache count
+        if moved > 0 then
+            if not self.cache[id] then
+                self.cache[id] = { total = 0, locations = {} }
+            end
+            self.cache[id].total = (self.cache[id].total or 0) + moved
+        end
+    else
+        -- Fallback path: We do not know what item is in the source slot.
+        -- We will pull from sourceSlot into empty slots of our storage chests,
+        -- and then check the details of what was placed there.
+        local limit = count or 64
         for _, name in ipairs(self.names) do
-            if toMove <= 0 then break end
+            if limit <= 0 then break end
             local p = wrap(name)
             if p and p.size and p.list then
                 local sz = p.size()
                 local list = p.list()
                 for s = 1, sz do
-                    if toMove <= 0 then break end
+                    if limit <= 0 then break end
                     if not list[s] then
-                        -- This slot is empty
+                        -- Pull blindly into this empty slot
                         local ok2, n = false, 0
                         if p.pullItems then
-                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, s)
-                        end
-                        if not ok2 or not n or n == 0 then
-                            -- Fallback: push from source peripheral
-                            if src.pushItems then
-                                ok2, n = pcall(src.pushItems, name, sourceSlot, toMove, s)
-                            end
+                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, limit, s)
                         end
                         if ok2 and n and n > 0 then
                             moved = moved + n
-                            toMove = toMove - n
-                            if not self.cache[id] then
-                                self.cache[id] = { total = 0, locations = {} }
+                            limit = limit - n
+                            -- Now wrap/query chest to find out what item we just pulled
+                            local detail
+                            if p.getItemDetail then
+                                local ok3, det = pcall(p.getItemDetail, s)
+                                if ok3 and det then detail = det end
                             end
-                            table.insert(self.cache[id].locations, { p = name, s = s, qty = n })
+                            if detail and detail.name then
+                                local item_id = detail.name
+                                if not self.cache[item_id] then
+                                    self.cache[item_id] = { total = 0, locations = {} }
+                                end
+                                self.cache[item_id].total = (self.cache[item_id].total or 0) + n
+                                table.insert(self.cache[item_id].locations, { p = name, s = s, qty = n })
+                            end
                         end
                     end
                 end
@@ -194,13 +251,6 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
         end
     end
 
-    -- 3. Update the total cache count
-    if moved > 0 then
-        if not self.cache[id] then
-            self.cache[id] = { total = 0, locations = {} }
-        end
-        self.cache[id].total = (self.cache[id].total or 0) + moved
-    end
     return moved
 end
 

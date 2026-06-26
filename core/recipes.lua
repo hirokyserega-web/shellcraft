@@ -538,11 +538,27 @@ function recipes:activeLearnMachine(storageName, machineName)
     pMachine.pushItems(storageName, outputSlot)
     
     local mType = peripheral.getType(machineName)
+    local targetMachine = mType
+    local ptypeLower = (mType or ""):lower()
+    local isSpecific = false
+    if ptypeLower:find("chest") or ptypeLower:find("barrel") or ptypeLower:find("vault") or ptypeLower:find("cabinet") then
+        isSpecific = true
+    end
+    local cfg = (_G.config or require("config")).load()
+    if cfg and cfg.peripherals and cfg.peripherals.machines then
+        for _, name in ipairs(cfg.peripherals.machines) do
+            if name == machineName then isSpecific = true; break end
+        end
+    end
+    if isSpecific then
+        targetMachine = machineName
+    end
+    
     local recipe = {
         id = outputItemDetail.name,
         name = outputItemDetail.displayName or outputItemDetail.name,
         type = "machine",
-        machine = mType,
+        machine = targetMachine,
         input = { { id = inputItem.name, count = 1 } },
         output = outputItemDetail.count or 1,
     }

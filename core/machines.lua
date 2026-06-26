@@ -273,7 +273,7 @@ function machines:findFree(machineType)
     for _, name in ipairs(self.names) do
         if not isClaimed(name) then
             local ptype = peripheral.getType(name)
-            local match = (machineType == nil) or matchType(ptype, machineType) or
+            local match = (machineType == nil) or (name == machineType) or matchType(ptype, machineType) or
                           (ptype and machineType and ptype:find(machineType, 1, true) ~= nil)
             if match then
                 local inf = self:info(name)

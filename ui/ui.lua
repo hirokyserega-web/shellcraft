@@ -1794,9 +1794,27 @@ function ui:renderRecipes(yTop, yBot, w)
                     if self.deps.machines then
                         for _, mname in ipairs(self.deps.machines.names) do
                             local ptype = peripheral.getType(mname)
-                            if ptype and not typeSet[ptype] then
-                                typeSet[ptype] = true
-                                table.insert(types, ptype)
+                            local isSpecific = false
+                            if self.configData.peripherals and self.configData.peripherals.machines then
+                                for _, name in ipairs(self.configData.peripherals.machines) do
+                                    if name == mname then isSpecific = true; break end
+                                end
+                            end
+                            local ptypeLower = (ptype or ""):lower()
+                            if ptypeLower:find("chest") or ptypeLower:find("barrel") or ptypeLower:find("vault") or ptypeLower:find("cabinet") then
+                                isSpecific = true
+                            end
+                            
+                            if isSpecific then
+                                if not typeSet[mname] then
+                                    typeSet[mname] = true
+                                    table.insert(types, mname)
+                                end
+                            else
+                                if ptype and not typeSet[ptype] then
+                                    typeSet[ptype] = true
+                                    table.insert(types, ptype)
+                                end
                             end
                         end
                     end
@@ -1987,27 +2005,36 @@ function ui:renderSettings(yTop, yBot, w)
     local st = self.state.settings
     local h = yBot - yTop + 1
     
-    local wLeft = math.floor(w * 0.48)
+    local wLeft = math.floor(w * 0.45)
     local startX = wLeft + 2
     local wRight = w - wLeft - 1
     
-    -- 1. Сбор инвентарей
-    local inventories = {}
+    -- 1. Сбор всех инвентарей
+    local allChests = {}
     for _, name in ipairs(peripheral.getNames()) do
         local ok, p = pcall(peripheral.wrap, name)
         if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-            local isMach = false
-            if self.deps.machines then
-                for _, mn in ipairs(self.deps.machines.names) do
-                    if mn == name then isMach = true; break end
-                end
-            end
-            if not isMach then
-                table.insert(inventories, name)
+            if name ~= self.configData.grid_chest then
+                table.insert(allChests, name)
             end
         end
     end
-    table.sort(inventories)
+    table.sort(allChests)
+    
+    -- Исключаем машины из списка обычных сундуков для Crafting Grid Chest
+    local machineMap = {}
+    if self.configData.peripherals and self.configData.peripherals.machines then
+        for _, mname in ipairs(self.configData.peripherals.machines) do
+            machineMap[mname] = true
+        end
+    end
+    
+    local inventories = {}
+    for _, name in ipairs(allChests) do
+        if not machineMap[name] then
+            table.insert(inventories, name)
+        end
+    end
     
     -- 2. Сбор баков/данков
     local fluidStorages = {}
@@ -2022,6 +2049,7 @@ function ui:renderSettings(yTop, yBot, w)
     -- Инициализируем scroll/selected под-состояния
     st.gridState = st.gridState or { scroll = 0, selected = 1 }
     st.dankState = st.dankState or { scroll = 0, selected = 1 }
+    st.machineState = st.machineState or { scroll = 0, selected = 1 }
     
     -- Заполняем строки для левой колонки (сетка крафта)
     local gridRows = {}
@@ -2037,7 +2065,7 @@ function ui:renderSettings(yTop, yBot, w)
         table.insert(gridRows, label)
     end
     
-    -- Заполняем строки для правой колонки (данк по умолчанию)
+    -- Заполняем строки для левой колонки (данк по умолчанию)
     local dankRows = {}
     local currentDank = self.configData.grid_dank
     for idx, name in ipairs(fluidStorages) do
@@ -2051,17 +2079,49 @@ function ui:renderSettings(yTop, yBot, w)
         table.insert(dankRows, label)
     end
     
-    -- Отрисовка левой колонки
+    -- Заполняем строки для правой колонки (сундуки как механизмы)
+    local machineRows = {}
+    for idx, name in ipairs(allChests) do
+        local label = formatPeriphName(name)
+        if machineMap[name] then
+            label = "[*] " .. label
+        else
+            label = "[ ] " .. label
+        end
+        table.insert(machineRows, label)
+    end
+    
+    -- Расчёт высот для левой колонки (делим пополам)
+    local hHalf = math.floor(h / 2)
+    local hLeft1 = hHalf - 1
+    local hLeft2 = h - hHalf - 1
+    
+    -- Отрисовка левой колонки (Вверху: Crafting Grid Chest)
     widgets.text(1, yTop, "Crafting Grid Chest:", colors.cyan, colors.black)
     if #gridRows == 0 then
         widgets.text(1, yTop + 2, "No chests found", colors.gray, colors.black)
     else
-        widgets.scrollList(self, 1, yTop + 1, wLeft, h - 1, gridRows, st.gridState, function(idx)
+        widgets.scrollList(self, 1, yTop + 1, wLeft, hLeft1, gridRows, st.gridState, function(idx)
             local selectedChest = inventories[idx]
             self.configData.grid_chest = selectedChest
             config.save(self.configData)
             self:addLog("Default grid chest: " .. selectedChest)
             self:showToast("Saved default grid chest", "success")
+        end)
+    end
+    
+    -- Отрисовка левой колонки (Внизу: Default Dank)
+    local yDankHeader = yTop + hHalf
+    widgets.text(1, yDankHeader, "Default Dank (Tank):", colors.cyan, colors.black)
+    if #dankRows == 0 then
+        widgets.text(1, yDankHeader + 2, "No tanks found", colors.gray, colors.black)
+    else
+        widgets.scrollList(self, 1, yDankHeader + 1, wLeft, hLeft2, dankRows, st.dankState, function(idx)
+            local selectedDank = fluidStorages[idx]
+            self.configData.grid_dank = selectedDank
+            config.save(self.configData)
+            self:addLog("Default dank: " .. selectedDank)
+            self:showToast("Saved default dank", "success")
         end)
     end
     
@@ -2073,17 +2133,45 @@ function ui:renderSettings(yTop, yBot, w)
         term.write("|")
     end
     
-    -- Отрисовка правой колонки
-    widgets.text(startX, yTop, "Default Dank (Tank):", colors.cyan, colors.black)
-    if #dankRows == 0 then
-        widgets.text(startX, yTop + 2, "No tanks found", colors.gray, colors.black)
+    -- Отрисовка правой колонки (Chests as Machines)
+    widgets.text(startX, yTop, "Chests as Machines (Create):", colors.cyan, colors.black)
+    if #machineRows == 0 then
+        widgets.text(startX, yTop + 2, "No chest peripherals found", colors.gray, colors.black)
     else
-        widgets.scrollList(self, startX, yTop + 1, wRight, h - 1, dankRows, st.dankState, function(idx)
-            local selectedDank = fluidStorages[idx]
-            self.configData.grid_dank = selectedDank
+        widgets.scrollList(self, startX, yTop + 1, wRight, h - 1, machineRows, st.machineState, function(idx)
+            local selectedName = allChests[idx]
+            self.configData.peripherals = self.configData.peripherals or {}
+            self.configData.peripherals.machines = self.configData.peripherals.machines or {}
+            
+            local foundIdx = nil
+            for i, name in ipairs(self.configData.peripherals.machines) do
+                if name == selectedName then foundIdx = i; break end
+            end
+            
+            if foundIdx then
+                table.remove(self.configData.peripherals.machines, foundIdx)
+                self:addLog("Chest machine removed: " .. selectedName)
+                self:showToast("Removed machine designation", "info")
+            else
+                table.insert(self.configData.peripherals.machines, selectedName)
+                self:addLog("Chest machine added: " .. selectedName)
+                self:showToast("Added machine designation", "success")
+            end
+            
             config.save(self.configData)
-            self:addLog("Default dank: " .. selectedDank)
-            self:showToast("Saved default dank", "success")
+            
+            -- Принудительное динамическое обновление на сервере
+            local resolved = config.resolve(self.configData)
+            self.deps.storage.names = resolved.storage or {}
+            self.deps.storage:scan()
+            
+            self.deps.fluids:resolvePool(resolved)
+            self.deps.fluids:scan()
+            
+            self.deps.machines:refreshStations(resolved)
+            
+            self:buildTabs()
+            self.dirty = true
         end)
     end
 end

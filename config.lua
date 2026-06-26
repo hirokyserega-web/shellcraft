@@ -146,22 +146,43 @@ end
 function config.resolve(cfg)
     local auto = config.detect()
     local result = { storage = {}, monitors = {}, modems = {}, machines = {} }
+    
+    -- 1. Сначала разрешаем машины
+    local manualMachines = cfg.peripherals and cfg.peripherals.machines
+    local machinesSet = {}
+    if manualMachines and #manualMachines > 0 then
+        for _, name in ipairs(manualMachines) do
+            if peripheral.isPresent(name) then
+                table.insert(result.machines, name)
+                machinesSet[name] = true
+            end
+        end
+    else
+        for _, name in ipairs(auto.machines or {}) do
+            table.insert(result.machines, name)
+            machinesSet[name] = true
+        end
+    end
+    
+    -- 2. Разрешаем остальные категории
     for k in pairs(result) do
-        -- Если в конфиге есть ручной список и он непуст — используем его
-        local manual = cfg.peripherals and cfg.peripherals[k]
-        if manual and #manual > 0 then
-            -- фильтруем существующие
-            for _, name in ipairs(manual) do
-                if peripheral.isPresent(name) then
-                    if not (k == "storage" and cfg.grid_chest == name) then
-                        table.insert(result[k], name)
+        if k ~= "machines" then
+            local manual = cfg.peripherals and cfg.peripherals[k]
+            if manual and #manual > 0 then
+                for _, name in ipairs(manual) do
+                    if peripheral.isPresent(name) then
+                        local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name]))
+                        if not isExcluded then
+                            table.insert(result[k], name)
+                        end
                     end
                 end
-            end
-        else
-            for _, name in ipairs(auto[k] or {}) do
-                if not (k == "storage" and cfg.grid_chest == name) then
-                    table.insert(result[k], name)
+            else
+                for _, name in ipairs(auto[k] or {}) do
+                    local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name]))
+                    if not isExcluded then
+                        table.insert(result[k], name)
+                    end
                 end
             end
         end

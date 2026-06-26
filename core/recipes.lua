@@ -476,56 +476,66 @@ function recipes:activeLearnMachine(storageName, machineName)
         return false, "storage chest is empty (place the item to process inside it)"
     end
     
-    -- Определяем слоты печи
-    local sz = pMachine.size()
-    local mSlots = { input = 1, output = 3 }
-    if sz == 3 then
-        mSlots = { input = 1, output = 3 }
-    elseif sz and sz > 1 then
-        mSlots = { input = 1, output = sz }
+    -- 1. Очищаем ВСЕ слоты машины (возвращаем их в сундук-хранилище)
+    local sz = pMachine.size() or 0
+    local machineList = pMachine.list() or {}
+    for s = 1, sz do
+        if machineList[s] then
+            pcall(pMachine.pushItems, storageName, s)
+        end
     end
     
-    -- Очищаем слоты печи
-    local machineList = pMachine.list()
-    if machineList[mSlots.output] then
-        pMachine.pushItems(storageName, mSlots.output)
+    -- Перемещаем 1 сырье в первый слот
+    local pushed = pStorage.pushItems(machineName, inputSlot, 1, 1)
+    if pushed == 0 then
+        -- Если не получилось в первый слот, пробуем без указания слота
+        pushed = pStorage.pushItems(machineName, inputSlot, 1)
     end
-    if machineList[mSlots.input] then
-        pMachine.pushItems(storageName, mSlots.input)
-    end
-    
-    -- Перемещаем 1 сырье
-    local pushed = pStorage.pushItems(machineName, inputSlot, 1, mSlots.input)
     if pushed == 0 then
         return false, "could not push item to machine"
     end
     
     local outputItemDetail = nil
+    local outputSlot = nil
     local deadline = os.clock() + 60
     while os.clock() < deadline do
         if pMachine.list then
             local ok, items = pcall(pMachine.list)
-            if ok and items and items[mSlots.output] then
-                outputItemDetail = items[mSlots.output]
-                if pMachine.getItemDetail then
-                    local ok2, det = pcall(pMachine.getItemDetail, mSlots.output)
-                    if ok2 and det and det.displayName then
-                        outputItemDetail.displayName = det.displayName
+            if ok and items then
+                for slot, item in pairs(items) do
+                    if item and item.name ~= inputItem.name then
+                        outputItemDetail = item
+                        outputSlot = slot
+                        break
                     end
                 end
-                break
             end
+        end
+        if outputItemDetail then
+            if pMachine.getItemDetail then
+                local ok2, det = pcall(pMachine.getItemDetail, outputSlot)
+                if ok2 and det and det.displayName then
+                    outputItemDetail.displayName = det.displayName
+                end
+            end
+            break
         end
         os.sleep(0.5)
     end
     
     if not outputItemDetail then
-        pMachine.pushItems(storageName, mSlots.input) -- возвращаем назад сырье
+        -- Возвращаем оставшееся сырье назад в сундук
+        local list = pMachine.list() or {}
+        for s = 1, sz do
+            if list[s] then
+                pcall(pMachine.pushItems, storageName, s)
+            end
+        end
         return false, "timeout waiting for machine processing"
     end
     
     -- Забираем результат в сундук
-    pMachine.pushItems(storageName, mSlots.output)
+    pMachine.pushItems(storageName, outputSlot)
     
     local mType = peripheral.getType(machineName)
     local recipe = {

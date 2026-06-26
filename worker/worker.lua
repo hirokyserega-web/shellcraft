@@ -264,7 +264,7 @@ local function verifyGridMatches(recipe)
     return true
 end
 
---- Выполнить один крафт.
+--- Выполнить один крафт в чанках (до 64 за раз).
 -- @param recipe рецепт
 -- @param count сколько штук результата
 -- @return true, howMany | false, ошибка
@@ -281,10 +281,14 @@ function worker:craft(recipe, count)
 
     local t0 = os.epoch("utc")
     local totalCrafted = 0
+    local remainingCrafts = crafts
+    local stepNum = 1
 
-    for n = 1, crafts do
-        -- 1. Layout 1 craft worth of ingredients
-        local lok, lerr = (recipe.type == "shaped") and layoutShaped(recipe, 1) or layoutShapeless(recipe, 1)
+    while remainingCrafts > 0 do
+        local chunk = math.min(64, remainingCrafts)
+        
+        -- 1. Layout chunk worth of ingredients
+        local lok, lerr = (recipe.type == "shaped") and layoutShaped(recipe, chunk) or layoutShapeless(recipe, chunk)
         if not lok then
             self.crafting = false
             return false, lerr
@@ -297,9 +301,9 @@ function worker:craft(recipe, count)
             return false, verr
         end
         
-        -- 3. Perform 1 craft
+        -- 3. Perform craft
         turtle.select(1)
-        local ok, reason = turtle.craft(1)
+        local ok, reason = turtle.craft(chunk)
         if not ok then
             self.crafting = false
             -- Dump current grid contents for diagnosis
@@ -309,7 +313,7 @@ function worker:craft(recipe, count)
                 if d then dump[#dump+1] = "slot" .. s .. "=" .. d.name .. "x" .. d.count end
             end
             local gridStr = #dump > 0 and table.concat(dump, ", ") or "empty"
-            return false, "turtle.craft rejected step " .. n .. "/" .. crafts ..
+            return false, "turtle.craft rejected step " .. stepNum ..
                 " (recipe " .. tostring(recipe.id) .. "): " .. tostring(reason) .. " | grid: " .. gridStr
         end
         
@@ -333,7 +337,9 @@ function worker:craft(recipe, count)
             end
         end
         
-        totalCrafted = totalCrafted + output
+        totalCrafted = totalCrafted + chunk * output
+        remainingCrafts = remainingCrafts - chunk
+        stepNum = stepNum + 1
     end
 
     local t1 = os.epoch("utc")

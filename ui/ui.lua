@@ -194,22 +194,22 @@ function ui:drawFrame(w, h)
     
     -- 3. Отрисовка контента активной вкладки
     local bodyY = 4
-    local bodyH = h - 4
+    local yBot = h - 1
     local footerY = h
     
     local tab = self.activeTab
     if tab == "craft" then
-        self:renderCraft(bodyY, bodyY + bodyH, w)
+        self:renderCraft(bodyY, yBot, w)
     elseif tab == "storage" then
-        self:renderStorage(bodyY, bodyY + bodyH, w)
+        self:renderStorage(bodyY, yBot, w)
     elseif tab == "machines" then
-        self:renderMachines(bodyY, bodyY + bodyH, w)
+        self:renderMachines(bodyY, yBot, w)
     elseif tab == "recipes" then
-        self:renderRecipes(bodyY, bodyY + bodyH, w)
+        self:renderRecipes(bodyY, yBot, w)
     elseif tab == "log" then
-        self:renderLog(bodyY, bodyY + bodyH, w)
+        self:renderLog(bodyY, yBot, w)
     elseif tab == "settings" then
-        self:renderSettings(bodyY, bodyY + bodyH, w)
+        self:renderSettings(bodyY, yBot, w)
     end
     
     -- 4. Подвал (Footer)
@@ -683,6 +683,9 @@ function ui:renderRecipes(yTop, yBot, w)
         widgets.scrollList(self, 1, yTop, wLeft, h - 1, rows, st, function(idx)
             st.selected = idx
         end)
+        if #rows == 0 then
+            widgets.text(2, yTop + 2, "No recipes", colors.gray, colors.black)
+        end
         
         widgets.button(self, 1, yBot, 8, "Delete", { kind = "danger" }, function()
             local r = list[st.selected]
@@ -694,6 +697,7 @@ function ui:renderRecipes(yTop, yBot, w)
         end)
         
         -- Вертикальный разделитель
+        term.setBackgroundColor(colors.black)
         for cy = yTop, yBot do
             term.setCursorPos(wLeft + 1, cy)
             term.setTextColor(colors.gray)
@@ -788,6 +792,8 @@ function ui:renderRecipes(yTop, yBot, w)
                         yLine = yLine + 1
                     end
                 end
+            else
+                widgets.text(startX, yTop + 2, "No recipe selected", colors.gray, colors.black)
             end
             
             -- Кнопки действий
@@ -809,6 +815,9 @@ function ui:renderRecipes(yTop, yBot, w)
         widgets.scrollList(self, 1, yTop, w, h - 1, rows, st, function(idx)
             st.selected = idx
         end)
+        if #rows == 0 then
+            widgets.text(2, yTop + 2, "No recipes", colors.gray, colors.black)
+        end
         
         widgets.button(self, 1, yBot, 6, "Record", { kind = "active" }, function()
             self:quickRecord()

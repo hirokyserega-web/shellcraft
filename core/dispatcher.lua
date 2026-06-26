@@ -22,10 +22,11 @@ function dispatcher.new(storage, machines)
     local self = setmetatable({}, dispatcher)
     self.storage = storage
     self.machines = machines
-    self.workers = {}     -- [id] = { info, state, current_task, last_seen, turtle_name }
+    self.workers = {}     -- [id] = { info, state, current_task, last_seen, task_started_at, turtle_name }
     self.tasks = {}       -- [task_id] = task
     self.queue = {}       -- массив task_id
     self.maxAttempts = 3
+    self.task_timeout = 120  -- per-task deadline in seconds (configurable)
     self.onEvent = nil
     return self
 end
@@ -156,10 +157,13 @@ function dispatcher:prepareIngredients(workerId, task)
     for _, ing in ipairs(ings) do
         -- Кладём без указания слота — pushItems сам распределит
         local moved = self.storage:extract(ing.id, ing.count, turtleName, nil)
+        util.info(string.format("Ingredient: moved %d/%d %s -> %s", moved, ing.count, lang.localize(ing.id), turtleName))
         if moved < ing.count then
             -- Не хватило — откат (вернуть всё из черепахи в хранилище)
             self:collectResult(workerId)
-            return false, "Missing " .. (ing.count - moved) .. " " .. lang.localize(ing.id)
+            local errMsg = string.format("Missing %d %s (moved %d/%d -> %s)",
+                ing.count - moved, lang.localize(ing.id), moved, ing.count, turtleName)
+            return false, errMsg
         end
     end
     return true
@@ -282,6 +286,7 @@ function dispatcher:tick()
     local w = self.workers[workerId]
     w.state = "busy"
     w.current_task = task
+    w.task_started_at = os.clock()  -- per-task deadline start (heartbeat does NOT reset this)
     task.status = "running"
     task.worker_id = workerId
     task.attempts = task.attempts + 1
@@ -337,6 +342,7 @@ function dispatcher:handleMessage(senderId, msg)
             end
             w.state = "free"
             w.current_task = nil
+            w.task_started_at = nil
         end
     elseif msg.type == net.MSG.HEARTBEAT then
         local w = self.workers[senderId]
@@ -350,21 +356,44 @@ function dispatcher:handleMessage(senderId, msg)
                 end
                 w.state = "free"
                 w.current_task = nil
+                w.task_started_at = nil
             end
         end
     end
 end
 
 --- Проверить зависших воркеров.
+-- Два независимых таймаута:
+--   1) Worker liveness: если heartbeat не приходил дольше `timeout` — воркер мёртв
+--   2) Per-task deadline: если задача выполняется дольше `self.task_timeout` — зависла
+-- Heartbeat обновляет ТОЛЬКО last_seen, НЕ продлевает task_started_at.
 function dispatcher:checkTimeouts(timeout)
     timeout = timeout or 60
     local now = os.clock()
     for id, w in pairs(self.workers) do
-        if w.state == "busy" and (now - (w.last_seen or now)) > timeout then
-            util.warn("Worker " .. id .. " timed out, returning task to queue")
-            if w.current_task then self:requeue(w.current_task) end
-            w.state = "free"
-            w.current_task = nil
+        if w.state == "busy" then
+            -- 1) Worker liveness: heartbeat не приходил слишком долго
+            if (now - (w.last_seen or now)) > timeout then
+                util.warn("Worker #" .. id .. " not responding (no heartbeat for " .. timeout .. "s), returning task to queue")
+                if w.current_task then
+                    emit(self, "task_timeout", { id = w.current_task.id, worker = id, reason = "worker_dead" })
+                    self:requeue(w.current_task)
+                end
+                w.state = "free"
+                w.current_task = nil
+                w.task_started_at = nil
+            -- 2) Per-task deadline: задача выполняется слишком долго
+            elseif w.task_started_at and (now - w.task_started_at) > self.task_timeout then
+                local elapsed = math.floor(now - w.task_started_at)
+                util.warn("Task on worker #" .. id .. " exceeded deadline (" .. elapsed .. "s > " .. self.task_timeout .. "s), returning to queue")
+                if w.current_task then
+                    emit(self, "task_timeout", { id = w.current_task.id, worker = id, reason = "task_deadline", elapsed = elapsed })
+                    self:requeue(w.current_task)
+                end
+                w.state = "free"
+                w.current_task = nil
+                w.task_started_at = nil
+            end
         end
     end
 end

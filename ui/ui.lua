@@ -57,6 +57,24 @@ function ui:taskFailed(err)
     end
 end
 
+--- Шаг крафта начат на воркере.
+function ui:taskStarted(recipeName, workerId)
+    self.dirty = true
+    self:showToast("Crafting " .. tostring(recipeName) .. " on turtle #" .. tostring(workerId), "info")
+end
+
+--- Шаг крафта истёк по таймауту.
+function ui:taskTimedOut(reason, workerId)
+    self.dirty = true
+    local msg = "Task timeout on turtle #" .. tostring(workerId)
+    if reason == "worker_dead" then
+        msg = "Worker #" .. tostring(workerId) .. " not responding - task returned to queue"
+    elseif reason == "task_deadline" then
+        msg = "Task on turtle #" .. tostring(workerId) .. " exceeded deadline - returned to queue"
+    end
+    self:showToast(msg, "danger")
+end
+
 --- Показать всплывающее Toast сообщение.
 function ui:showToast(msg, kind)
     self.toast = {

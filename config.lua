@@ -15,6 +15,7 @@ config.defaults = {
     update_interval = 300,     -- проверка обновлений раз в N секунд
     net_timeout = 5,
     heartbeat_interval = 10,
+    task_timeout = 120,        -- per-task crafting deadline in seconds
     use_russian_names = false, -- Requires a Cyrillic font resource pack or transliteration
     text_scale = 0.5,          -- Text scale for monitor (e.g. 1.0 or 0.5)
     grid_chest = nil,          -- default storage grid chest for recording recipes

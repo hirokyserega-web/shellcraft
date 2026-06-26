@@ -12,6 +12,7 @@ function worker.new()
     local self = setmetatable({}, worker)
     self.core_id = nil
     self.crafting = false
+    self.canCraft = true  -- set to false if turtle lacks crafting table
     return self
 end
 
@@ -235,6 +236,33 @@ function worker:run()
     end
 
     util.ok("Worker #" .. os.getComputerID() .. " started, waiting for tasks")
+
+    -- Validate turtle APIs at startup
+    if type(turtle) ~= "table" then
+        util.err("ERROR: 'turtle' API not available. This program must run on a turtle!")
+        self.canCraft = false
+    else
+        if type(turtle.craft) ~= "function" then
+            util.err("========================================")
+            util.err("WARNING: turtle.craft is NOT available!")
+            util.err("This turtle has no crafting table.")
+            util.err("Equip a Crafting Table to make a")
+            util.err("Crafting Turtle, or craft requests")
+            util.err("will be rejected with an error.")
+            util.err("========================================")
+            self.canCraft = false
+        end
+        if type(turtle.getItemDetail) ~= "function" then
+            util.warn("WARNING: turtle.getItemDetail not available")
+        end
+        if type(turtle.transferTo) ~= "function" then
+            util.warn("WARNING: turtle.transferTo not available")
+        end
+        if type(turtle.select) ~= "function" then
+            util.warn("WARNING: turtle.select not available")
+        end
+    end
+
     -- Первичный HELLO (broadcast) — Core подхватит
     self:sayHello(nil)
     -- Периодический heartbeat
@@ -248,26 +276,65 @@ function worker:run()
             elseif msg.type == net.MSG.CRAFT_REQUEST then
                 local p = msg.payload or {}
                 self.core_id = senderId
-                util.info("Craft task: " .. tostring(p.recipe and p.recipe.id) .. " x" .. tostring(p.count))
-                self:sendStatus(p.task_id, 0, "starting")
-                local ok, res, elapsed, crafts = self:craft(p.recipe, p.count)
-                if ok then
-                    self:sendStatus(p.task_id, 100, "done")
-                    self:sendResult(p.task_id, true, {
-                        task_id = p.task_id,
-                        success = true,
-                        count = res,
-                        elapsed = elapsed,
-                        crafts = crafts,
-                    })
-                    util.ok("Done: " .. res .. " pcs in " .. string.format("%.2f", elapsed or 0) .. "s")
-                else
-                    self:sendResult(p.task_id, false, {
-                        task_id = p.task_id,
-                        success = false,
-                        error = res,
-                    })
-                    util.err("Craft error: " .. tostring(res))
+                -- Wrap entire CRAFT_REQUEST handling in pcall to prevent silent crashes
+                local handlerOk, handlerErr = pcall(function()
+                    util.info("Craft task: " .. tostring(p.recipe and p.recipe.id) .. " x" .. tostring(p.count))
+                    -- Check if this turtle can craft
+                    if not self.canCraft then
+                        self:sendResult(p.task_id, false, {
+                            task_id = p.task_id,
+                            success = false,
+                            error = "This turtle has no crafting table (not a Crafting Turtle) - cannot craft.",
+                        })
+                        util.err("Rejected craft: no crafting table")
+                        return
+                    end
+                    self:sendStatus(p.task_id, 0, "starting")
+                    -- pcall around craft() to catch any runtime errors
+                    local craftOk, ok, res, elapsed, crafts = pcall(self.craft, self, p.recipe, p.count)
+                    if not craftOk then
+                        -- craft() itself threw an error (crash)
+                        self.crafting = false
+                        local errText = "Worker crash in craft(): " .. tostring(ok)
+                        self:sendResult(p.task_id, false, {
+                            task_id = p.task_id,
+                            success = false,
+                            error = errText,
+                        })
+                        util.err(errText)
+                        return
+                    end
+                    if ok then
+                        self:sendStatus(p.task_id, 100, "done")
+                        self:sendResult(p.task_id, true, {
+                            task_id = p.task_id,
+                            success = true,
+                            count = res,
+                            elapsed = elapsed,
+                            crafts = crafts,
+                        })
+                        util.ok("Done: " .. res .. " pcs in " .. string.format("%.2f", elapsed or 0) .. "s")
+                    else
+                        self:sendResult(p.task_id, false, {
+                            task_id = p.task_id,
+                            success = false,
+                            error = res,
+                        })
+                        util.err("Craft error: " .. tostring(res))
+                    end
+                end)
+                if not handlerOk then
+                    -- Outer pcall caught an error in the handler itself
+                    self.crafting = false
+                    local errText = "Worker crash handling CRAFT_REQUEST: " .. tostring(handlerErr)
+                    pcall(function()
+                        self:sendResult(p.task_id, false, {
+                            task_id = p.task_id,
+                            success = false,
+                            error = errText,
+                        })
+                    end)
+                    util.err(errText)
                 end
             elseif msg.type == net.MSG.LEARN_CRAFT_REQUEST then
                 self.core_id = senderId

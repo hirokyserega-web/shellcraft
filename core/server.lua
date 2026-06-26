@@ -34,6 +34,7 @@ function server.run()
     local disp = dispatcher.new(st)
     disp.machines = mach
     disp.recipes = rec
+    if cfg.task_timeout then disp.task_timeout = cfg.task_timeout end
 
     -- 4. Связь событий -> UI + лог + прогресс
     local uiInstance = nil
@@ -44,14 +45,27 @@ function server.run()
             elseif payload.id then msg = msg .. " " .. lang.display(payload.id)
             elseif payload.error then msg = msg .. " " .. tostring(payload.error) end
             if payload.count then msg = msg .. " x" .. payload.count end
+            if payload.worker and payload.worker ~= "machine" then
+                msg = msg .. " [turtle #" .. tostring(payload.worker) .. "]"
+            end
         end
-        util.info("[система] " .. msg, true)
+        util.info("[event] " .. msg, true)
         if uiInstance then
             uiInstance:addLog(msg)
-            if etype == "task_done" then
+            if etype == "task_started" then
+                local name = payload and payload.recipe and lang.display(payload.recipe) or "?"
+                local wStr = payload and payload.worker or "?"
+                uiInstance:taskStarted(name, wStr)
+            elseif etype == "task_done" then
+                local name = payload and payload.recipe and lang.display(payload.recipe) or "?"
                 uiInstance:taskDone()
+                uiInstance:showToast("Done: " .. name .. (payload and payload.count and (" x" .. payload.count) or ""), "success")
             elseif etype == "task_failed" then
                 uiInstance:taskFailed(payload and payload.error)
+            elseif etype == "task_timeout" then
+                local reason = payload and payload.reason or "unknown"
+                local wStr = payload and payload.worker or "?"
+                uiInstance:taskTimedOut(reason, wStr)
             end
         end
     end

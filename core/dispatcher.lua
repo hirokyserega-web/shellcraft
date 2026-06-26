@@ -199,18 +199,8 @@ function dispatcher:prepareIngredients(workerId, task)
     if not p then
         return false, "Turtle #"..tostring(workerId).." is not reachable. Connect the turtle to a WIRED modem and ENABLE it (right-click the modem, it must glow red)."
     end
-    -- Очистить инвентарь черепахи от старых предметов (только если они там есть)
-    local listOk, listItems = pcall(p.list)
-    local hasItems = false
-    if listOk and listItems then
-        for _, _ in pairs(listItems) do
-            hasItems = true
-            break
-        end
-    end
-    if hasItems then
-        self:collectResult(workerId)
-    end
+    -- Очистить инвентарь черепахи от старых предметов
+    self:collectResult(workerId)
     local ings = recipes.ingredientsFor(task.recipe, task.count)
     for _, ing in ipairs(ings) do
         -- Кладём без указания слота — pushItems сам распределит
@@ -224,18 +214,6 @@ function dispatcher:prepareIngredients(workerId, task)
             return false, errMsg
         end
     end
-    -- Log final turtle inventory snapshot for diagnosis
-    local invOk, invList = pcall(p.list)
-    if invOk and invList then
-        local snapshot = {}
-        for slot, item in pairs(invList) do
-            if item and item.name then
-                table.insert(snapshot, "slot" .. slot .. "=" .. item.name .. "x" .. item.count)
-            end
-        end
-        local snapStr = #snapshot > 0 and table.concat(snapshot, ", ") or "empty"
-        util.info("Turtle #" .. tostring(workerId) .. " inventory snapshot: " .. snapStr)
-    end
     return true
 end
 
@@ -243,16 +221,9 @@ end
 function dispatcher:collectResult(workerId)
     local turtleName = self:workerName(workerId)
     if not turtleName then return 0 end
-    local p = peripheral.wrap(turtleName)
-    if not p then return 0 end
     local total = 0
-    local ok, list = pcall(p.list)
-    if ok and list then
-        for slot, item in pairs(list) do
-            if item and (item.count or 0) > 0 then
-                total = total + self.storage:deposit(turtleName, slot, nil)
-            end
-        end
+    for slot = 1, 16 do
+        total = total + self.storage:deposit(turtleName, slot, nil)
     end
     return total
 end

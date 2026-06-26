@@ -277,6 +277,11 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
                                 self.cache[item_id].total = (self.cache[item_id].total or 0) + n
                                 table.insert(self.cache[item_id].locations, { p = name, s = s, qty = n })
                             end
+                        else
+                            -- If we couldn't pull anything, the source slot is likely empty or we can't pull at all.
+                            -- Break out immediately to avoid querying hundreds of other empty slots.
+                            limit = 0
+                            break
                         end
                     end
                 end

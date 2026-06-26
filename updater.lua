@@ -5,6 +5,22 @@
 
 local updater = {}
 
+-- Ensure util and config are initialized (especially for direct interactive shell runs)
+local util = _G.util
+if not util then
+    util = require("lib.util")
+    _G.util = util
+end
+
+local config = _G.config
+if not config then
+    local ok, mod = pcall(require, "config")
+    if ok then
+        config = mod
+        _G.config = config
+    end
+end
+
 --- Список всех файлов проекта (относительно update_url).
 updater.FILES = {
     "startup.lua",
@@ -135,7 +151,7 @@ end
 -- @param force скачать даже если версия та же
 -- @return true если обновлено, false если не требовалось
 function updater.update(baseUrl, force)
-    baseUrl = baseUrl or config.defaults.update_url
+    baseUrl = baseUrl or (config and config.defaults and config.defaults.update_url) or "https://raw.githubusercontent.com/hirokyserega-web/shellcraft/main/"
     util.info("Checking updates from " .. baseUrl)
 
     local local_ = updater.localVersion()

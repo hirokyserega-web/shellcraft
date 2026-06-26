@@ -1022,10 +1022,68 @@ end
 function ui:startRecordWizard(stationName)
     local st = self.state.machines
     st.recordMode = true
-    st.recordStage = "select_fluids"
+    st.recordStage = "choose_type"
     st.recordStation = stationName
     st.recordFluidsSelection = {}
-    st.recordDanks = self.deps.fluids.danks or {}
+    
+    -- Сбор всех возможных баков с жидкостями (назначенные данки + любые другие баки)
+    local danks = {}
+    local assignedSet = {}
+    for _, dk in ipairs(self.deps.fluids.danks or {}) do
+        table.insert(danks, { periph = dk.periph, fluid = dk.fluid, target = dk.target })
+        assignedSet[dk.periph] = true
+    end
+    for _, name in ipairs(peripheral.getNames()) do
+        if not assignedSet[name] then
+            local p = peripheral.wrap(name)
+            if p and (peripheral.hasType(name, "fluid_storage") or type(p.tanks) == "function") then
+                local fluidName = "any"
+                local ok, tks = pcall(p.tanks)
+                if ok and tks and tks[1] then
+                    fluidName = tks[1].name or tks[1].fluid or "any"
+                end
+                table.insert(danks, { periph = name, fluid = fluidName, target = 16000 })
+            end
+        end
+    end
+    st.recordDanks = danks
+end
+
+function ui:recordSendAndStart()
+    local st = self.state.machines
+    local gridChest = self.configData.grid_chest
+    if not gridChest then
+        self:showToast("Set grid chest in Settings first", "danger")
+        return false
+    end
+    
+    st.recordSnapshotBefore = recipes.snapshotAll(st.recordStation, gridChest, self.deps.storage, self.deps.fluids)
+    st.recordStationBefore = recipes.snapshotStation(st.recordStation)
+    
+    -- Push items
+    local p = peripheral.wrap(gridChest)
+    if p and p.list then
+        local list = p.list()
+        for slot, info in pairs(list) do
+            p.pushItems(st.recordStation, slot)
+        end
+    end
+    
+    -- Push fluids
+    local danks = st.recordDanks or {}
+    for periph, mb in pairs(st.recordFluidsSelection) do
+        local fluidName = nil
+        for _, dk in ipairs(danks) do
+            if dk.periph == periph then fluidName = dk.fluid; break end
+        end
+        if fluidName and mb > 0 then
+            self.deps.fluids:extractFluid(fluidName, mb, st.recordStation)
+        end
+    end
+    
+    st.recordStage = "processing"
+    self:showToast("Sent inputs to station!", "success")
+    return true
 end
 
 function ui:renderRecordFSM(yTop, yBot, w)
@@ -1033,7 +1091,24 @@ function ui:renderRecordFSM(yTop, yBot, w)
     local h = yBot - yTop + 1
     local gridChest = self.configData.grid_chest
     
-    if st.recordStage == "select_fluids" then
+    if st.recordStage == "choose_type" then
+        widgets.text(1, yTop, "Record: Recipe Type", colors.cyan, colors.black)
+        widgets.text(1, yTop + 2, "Does this recipe require input fluids?", colors.white, colors.black)
+        
+        widgets.button(self, 1, yTop + 4, 15, "Items Only", { kind = "active" }, function()
+            st.recordFluidsSelection = {}
+            self:recordSendAndStart()
+        end)
+        
+        widgets.button(self, 18, yTop + 4, 15, "Items & Fluids", { kind = "normal" }, function()
+            st.recordStage = "select_fluids"
+        end)
+        
+        widgets.button(self, 1, yBot, 10, "Cancel", { kind = "danger" }, function()
+            st.recordMode = false
+        end)
+        
+    elseif st.recordStage == "select_fluids" then
         widgets.text(1, yTop, "Record: Send Input Fluids", colors.cyan, colors.black)
         
         local listY = yTop + 1
@@ -1056,10 +1131,10 @@ function ui:renderRecordFSM(yTop, yBot, w)
                 
                 term.setCursorPos(5, yCurr)
                 term.setTextColor(colors.white)
-                term.write(widgets.clip(util.formatId(dk.fluid) .. " (" .. dk.periph .. ")", w - 18))
+                term.write(widgets.clip(util.formatId(dk.fluid) .. " (" .. dk.periph .. ")", w - 20))
                 
                 if isSelected then
-                    widgets.stepper(self, w - 12, yCurr, 12, val, function(delta)
+                    widgets.stepper(self, w - 16, yCurr, 16, val, function(delta)
                         st.recordFluidsSelection[dk.periph] = math.max(1000, val + delta * 1000)
                     end)
                 end
@@ -1068,40 +1143,11 @@ function ui:renderRecordFSM(yTop, yBot, w)
         end
         
         if #danks == 0 then
-            widgets.text(2, listY + 1, "No danks set - items only.", colors.yellow, colors.black)
+            widgets.text(2, listY + 1, "No fluid storages on network.", colors.yellow, colors.black)
         end
         
         widgets.button(self, 1, yBot, 15, "Send & Start", { kind = "active" }, function()
-            if not gridChest then
-                self:showToast("Set grid chest in Settings first", "danger")
-                return
-            end
-            
-            st.recordSnapshotBefore = recipes.snapshotAll(st.recordStation, gridChest, self.deps.storage, self.deps.fluids)
-            st.recordStationBefore = recipes.snapshotStation(st.recordStation)
-            
-            -- Push items
-            local p = wrap(gridChest)
-            if p and p.list then
-                local list = p.list()
-                for slot, info in pairs(list) do
-                    p.pushItems(st.recordStation, slot)
-                end
-            end
-            
-            -- Push fluids
-            for periph, mb in pairs(st.recordFluidsSelection) do
-                local fluidName = nil
-                for _, dk in ipairs(danks) do
-                    if dk.periph == periph then fluidName = dk.fluid; break end
-                end
-                if fluidName and mb > 0 then
-                    self.deps.fluids:extractFluid(fluidName, mb, st.recordStation)
-                end
-            end
-            
-            st.recordStage = "processing"
-            self:showToast("Sent inputs to station!", "success")
+            self:recordSendAndStart()
         end)
         
         widgets.button(self, 18, yBot, 10, "Cancel", { kind = "danger" }, function()

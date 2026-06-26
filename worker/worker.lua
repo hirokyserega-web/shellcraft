@@ -288,9 +288,10 @@ function worker:craft(recipe, count)
     local totalCrafted = 0
     local remainingCrafts = crafts
     local stepNum = 1
-
     while remainingCrafts > 0 do
-        local chunk = math.min(64, remainingCrafts)
+        local maxChunk = math.floor(64 / (recipe.output or 1))
+        if maxChunk < 1 then maxChunk = 1 end
+        local chunk = math.min(maxChunk, remainingCrafts)
         
         -- 1. Layout chunk worth of ingredients
         local lok, lerr = (recipe.type == "shaped") and layoutShaped(recipe, chunk) or layoutShapeless(recipe, chunk)

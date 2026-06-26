@@ -134,14 +134,39 @@ end
 -- @return сколько перемещено
 function storage:deposit(sourcePeripheral, sourceSlot, count)
     local src = wrap(sourcePeripheral)
+    if not src then return 0 end
+    
     local id, toMove
-    local hasGetItemDetail = src and type(src.getItemDetail) == "function"
+    local hasGetItemDetail = type(src.getItemDetail) == "function"
+    local hasList = type(src.list) == "function"
+    local queried = false
     
     if hasGetItemDetail then
         local ok, detail = pcall(src.getItemDetail, sourceSlot)
-        if ok and detail then
-            id = detail.name
-            toMove = count or detail.count or 0
+        if ok then
+            queried = true
+            if detail then
+                id = detail.name
+                toMove = count or detail.count or 0
+            else
+                -- Slot is definitely empty!
+                return 0
+            end
+        end
+    end
+    
+    if not queried and hasList then
+        local ok, list = pcall(src.list)
+        if ok and list then
+            queried = true
+            local item = list[sourceSlot]
+            if item then
+                id = item.name
+                toMove = count or item.count or 0
+            else
+                -- Slot is definitely empty!
+                return 0
+            end
         end
     end
 
@@ -160,7 +185,7 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
                     end
                     if not ok2 or not n or n == 0 then
                         -- Fallback: push from source peripheral
-                        if src and src.pushItems then
+                        if src.pushItems then
                             ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
                         end
                     end
@@ -191,7 +216,7 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
                             end
                             if not ok2 or not n or n == 0 then
                                 -- Fallback: push from source peripheral
-                                if src and src.pushItems then
+                                if src.pushItems then
                                     ok2, n = pcall(src.pushItems, name, sourceSlot, toMove, s)
                                 end
                             end
@@ -216,7 +241,7 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
             end
             self.cache[id].total = (self.cache[id].total or 0) + moved
         end
-    else
+    elseif not queried then
         -- Fallback path: We do not know what item is in the source slot.
         -- We will pull from sourceSlot into empty slots of our storage chests,
         -- and then check the details of what was placed there.

@@ -664,6 +664,9 @@ function ui:quickRecord()
     if ok then
         self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
         self:addLog("Auto-learned recipe: " .. recipe.id)
+        local st = self.state.recipes
+        st.mode = "saved_dialog"
+        st.savedRecipe = recipe
     else
         self:showToast(tostring(recipe), "danger")
     end
@@ -705,10 +708,12 @@ function ui:wizardNext(wRows)
             if ok then
                 self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
                 self:addLog("Static recipe learned: " .. recipe.id)
+                st.mode = "saved_dialog"
+                st.savedRecipe = recipe
             else
                 self:showToast(tostring(recipe), "danger")
+                st.mode = "list"
             end
-            st.mode = "list"
         else
             st.wizardStep = 3
             st.wizardSelected = 1
@@ -722,8 +727,11 @@ function ui:wizardNext(wRows)
             if ok then
                 self:showToast("Smelt Saved: " .. self.deps.lang.display(recipe.id), "success")
                 self:addLog("Machine recipe learned: " .. recipe.id)
+                st.mode = "saved_dialog"
+                st.savedRecipe = recipe
             else
                 self:showToast(tostring(recipe), "danger")
+                st.mode = "list"
             end
         elseif st.learnType == 3 then
             local workerId = tonumber(selectedVal:match("#(%d+)"))
@@ -733,14 +741,17 @@ function ui:wizardNext(wRows)
                 if ok then
                     self:showToast("Craft Saved: " .. self.deps.lang.display(recipe.id), "success")
                     self:addLog("Turtle recipe learned: " .. recipe.id)
+                    st.mode = "saved_dialog"
+                    st.savedRecipe = recipe
                 else
                     self:showToast(tostring(recipe), "danger")
+                    st.mode = "list"
                 end
             else
                 self:showToast("Invalid worker selected", "danger")
+                st.mode = "list"
             end
         end
-        st.mode = "list"
     end
 end
 
@@ -749,6 +760,44 @@ function ui:renderRecipes(yTop, yBot, w)
     local recipes = self.deps.recipes
     local list = recipes:all()
     local h = yBot - yTop + 1
+    
+    if st.mode == "saved_dialog" then
+        local r = st.savedRecipe
+        if not r then st.mode = "list"; return end
+        
+        local name = self.deps.lang.display(r.id, r.name)
+        local bodyFn = function(cx, cy, cw, ch)
+            widgets.text(cx, cy, "Recipe saved successfully!", colors.green, colors.black)
+            widgets.text(cx, cy + 2, "Result: " .. widgets.clip(name, cw - 8), colors.white, colors.black)
+            widgets.text(cx, cy + 3, "Output yield: x" .. (r.output or 1), colors.lightGray, colors.black)
+            widgets.text(cx, cy + 4, "Type: " .. tostring(r.type), colors.lightGray, colors.black)
+            
+            if ch >= 8 then
+                widgets.text(cx, cy + 5, "Ingredients:", colors.cyan, colors.black)
+                local ings = recipes.ingredientsOf(r)
+                local yLine = cy + 6
+                for _, ing in ipairs(ings) do
+                    if yLine <= cy + ch - 1 then
+                        widgets.text(cx, yLine, string.format(" - %s x%d", widgets.clip(self.deps.lang.display(ing.id), cw - 12), ing.count), colors.lightGray, colors.black)
+                        yLine = yLine + 1
+                    end
+                end
+            end
+        end
+        
+        local buttons = {
+            {
+                label = "OK",
+                kind = "active",
+                action = function()
+                    st.mode = "list"
+                    st.savedRecipe = nil
+                end
+            }
+        }
+        widgets.dialog(self, "Recipe Saved", bodyFn, buttons)
+        return
+    end
     
     local isSplit = (w >= 34)
     

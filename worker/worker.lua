@@ -99,7 +99,8 @@ local function layoutShaped(recipe, crafts)
     for i = 1, 9 do
         local row = math.ceil(i / 3)
         local col = ((i - 1) % 3) + 1
-        local targetId = recipe.pattern[row] and recipe.pattern[row][col]
+        local cell = recipe.pattern[row] and recipe.pattern[row][col]
+        local targetId = cell and (type(cell) == "table" and cell.id or cell)
         if targetId then
             local need = crafts
             local searchFrom = 1

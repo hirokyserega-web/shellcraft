@@ -121,12 +121,44 @@ function server.run()
         uiInstance:addLog("Workers not found - please enable turtle workers")
     end
 
+    -- 6b. Helper to dynamically refresh peripherals
+    local function refreshPeripherals()
+        local currentCfg = config.load()
+        local resolved = config.resolve(currentCfg)
+        
+        st.names = resolved.storage or {}
+        st:scan()
+        
+        fl:resolvePool(resolved)
+        fl:scan()
+        
+        mach:refreshStations(resolved)
+        
+        if uiInstance then
+            uiInstance.configData = currentCfg
+            uiInstance:buildTabs()
+            uiInstance.dirty = true
+        end
+    end
+
     -- 7. Корутины
     local function netListener()
         while true do
             local senderId, msg = net.receive(nil)
             if senderId and msg then
                 disp:handleMessage(senderId, msg)
+            end
+        end
+    end
+
+    local function peripheralLoop()
+        while true do
+            local ev, name = os.pullEvent()
+            if ev == "peripheral" or ev == "peripheral_detach" then
+                pcall(refreshPeripherals)
+                if uiInstance then
+                    uiInstance:addLog("Peripherals updated: " .. tostring(name))
+                end
             end
         end
     end
@@ -227,6 +259,7 @@ function server.run()
         machineLoop,
         storageScanLoop,
         discoveryLoop,
+        peripheralLoop,
         uiLoop
     )
     util.warn("Server stopped")

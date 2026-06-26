@@ -17,6 +17,7 @@ updater.FILES = {
     "core/planner.lua",
     "core/machines.lua",
     "core/dispatcher.lua",
+    "core/fluids.lua",
     "worker/worker.lua",
     "ui/ui.lua",
     "ui/widgets.lua",

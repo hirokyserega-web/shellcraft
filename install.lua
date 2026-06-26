@@ -20,6 +20,7 @@ local FILES = {
     "startup.lua", "updater.lua", "config.lua", "version",
     "core/server.lua", "core/storage.lua", "core/recipes.lua",
     "core/planner.lua", "core/machines.lua", "core/dispatcher.lua",
+    "core/fluids.lua",
     "worker/worker.lua", "ui/ui.lua", "ui/widgets.lua",
     "lang/ru.lua", "lib/net.lua", "lib/util.lua",
     "lib/names.lua", "tools/gen_lang.lua",

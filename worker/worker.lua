@@ -309,7 +309,7 @@ function worker:craft(recipe, count)
         
         -- 3. Perform craft
         turtle.select(1)
-        local ok, reason = turtle.craft(chunk)
+        local ok, reason = turtle.craft(chunk * output)
         if not ok then
             self.crafting = false
             -- Dump current grid contents for diagnosis

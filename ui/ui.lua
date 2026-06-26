@@ -20,6 +20,7 @@ function ui.new(monitor, deps)
     
     self.state = {
         craft    = { scroll = 0, selected = 1, mode = "list", qty = "1", active = nil },
+        active   = { scroll = 0, selected = 1 },
         storage  = { scroll = 0, selected = 1, search = "", showKeyboard = false },
         machines = { scroll = 0, selected = 1 },
         recipes  = { scroll = 0, selected = 1, mode = "list", wizardStep = 1, learnType = 1, wizardScroll = 0, wizardSelected = 1 },
@@ -97,6 +98,7 @@ end
 function ui:buildTabs()
     self.tabs = {
         { id = "craft",   title = "Craft" },
+        { id = "active",  title = "Active" },
         { id = "storage", title = "Storage" },
     }
     if self.deps.machines and self.deps.machines:count() > 0 then
@@ -221,6 +223,8 @@ function ui:drawFrame(w, h)
     local tab = self.activeTab
     if tab == "craft" then
         self:renderCraft(bodyY, yBot, w)
+    elseif tab == "active" then
+        self:renderActive(bodyY, yBot, w)
     elseif tab == "storage" then
         self:renderStorage(bodyY, yBot, w)
     elseif tab == "machines" then
@@ -293,6 +297,8 @@ function ui:footerHint()
     local tab = self.activeTab
     if tab == "craft" then
         return "Tap recipe to order. X - Exit."
+    elseif tab == "active" then
+        return "Tap task to select. Cancel to abort."
     elseif tab == "storage" then
         return "Scroll list. Toggle Keyboard to search."
     elseif tab == "machines" then
@@ -519,6 +525,121 @@ function ui:renderCraft(yTop, yBot, w)
         }
         
         widgets.dialog(self, "Craft Order", bodyFn, buttons)
+    end
+end
+
+----------------------------------------------------------------
+-- Вкладка АКТИВНЫЕ (Active)
+----------------------------------------------------------------
+function ui:renderActive(yTop, yBot, w)
+    local st = self.state.active
+    local disp = self.deps.dispatcher
+    local h = yBot - yTop + 1
+    
+    if not disp then
+        widgets.center(math.floor((yTop + yBot) / 2), "Dispatcher not connected", colors.red)
+        return
+    end
+    
+    local list = disp:activeTasks()
+    table.sort(list, function(a, b) return a.id < b.id end)
+    
+    if #list == 0 then
+        widgets.center(math.floor((yTop + yBot) / 2), "No active crafts", colors.gray)
+        return
+    end
+    
+    local isSplit = (w >= 34)
+    
+    if isSplit then
+        local wLeft = math.floor(w * 0.45)
+        local startX = wLeft + 2
+        local wRight = w - wLeft - 1
+        
+        -- Left column: List of active tasks
+        local rows = {}
+        for _, t in ipairs(list) do
+            local name = self.deps.lang.display(t.recipe.id, t.recipe.name)
+            local statusChar = t.status == "running" and "R" or "Q"
+            table.insert(rows, string.format("[%s] %s x%d", statusChar, name, t.count))
+        end
+        
+        widgets.scrollList(self, 1, yTop, wLeft, h, rows, st, function(idx)
+            st.selected = idx
+        end)
+        
+        -- Vertical separator
+        term.setBackgroundColor(colors.black)
+        for cy = yTop, yBot do
+            term.setCursorPos(wLeft + 1, cy)
+            term.setTextColor(colors.gray)
+            term.write("|")
+        end
+        
+        -- Right column: Selected task details
+        widgets.clearArea(startX, yTop, wRight, h)
+        
+        local t = list[st.selected]
+        if not t then
+            st.selected = 1
+            t = list[1]
+        end
+        
+        if t then
+            local name = self.deps.lang.display(t.recipe.id, t.recipe.name)
+            widgets.text(startX, yTop, "Task: " .. widgets.clip(name, wRight - 6), colors.cyan, colors.black)
+            widgets.text(startX, yTop + 1, "ID: " .. t.id, colors.lightGray, colors.black)
+            widgets.text(startX, yTop + 2, "Count: " .. t.count, colors.white, colors.black)
+            
+            local statusStr = t.status == "running" and ("Running on #" .. tostring(t.worker_id)) or "Queued"
+            local statusCol = t.status == "running" and colors.yellow or colors.lightGray
+            widgets.text(startX, yTop + 3, "Status: " .. statusStr, statusCol, colors.black)
+            
+            widgets.text(startX, yTop + 4, "Attempts: " .. t.attempts .. "/" .. disp.maxAttempts, colors.lightGray, colors.black)
+            
+            if t.status == "running" and t.progress then
+                widgets.text(startX, yTop + 5, "Progress: " .. t.progress .. "%", colors.green, colors.black)
+            end
+            
+            -- Cancel button at the bottom of the right column
+            widgets.button(self, startX, yBot, wRight, "Cancel Task", { kind = "danger" }, function()
+                local ok, err = disp:cancelTask(t.id)
+                if ok then
+                    self:showToast("Task cancelled", "success")
+                    st.selected = math.max(1, st.selected - 1)
+                else
+                    self:showToast(tostring(err), "danger")
+                end
+            end)
+        end
+    else
+        -- Compact layout
+        local rows = {}
+        for _, t in ipairs(list) do
+            local name = self.deps.lang.display(t.recipe.id, t.recipe.name)
+            local statusStr = t.status == "running" and ("R:" .. tostring(t.worker_id)) or "Q"
+            table.insert(rows, string.format("[%s] %s x%d", statusStr, name, t.count))
+        end
+        
+        widgets.scrollList(self, 1, yTop, w, h - 2, rows, st, function(idx)
+            st.selected = idx
+        end)
+        
+        -- Cancel button at the bottom
+        widgets.button(self, 1, yBot, w, "Cancel Selected", { kind = "danger" }, function()
+            local t = list[st.selected]
+            if t then
+                local ok, err = disp:cancelTask(t.id)
+                if ok then
+                    self:showToast("Task cancelled", "success")
+                    st.selected = math.max(1, st.selected - 1)
+                else
+                    self:showToast(tostring(err), "danger")
+                end
+            else
+                self:showToast("No task selected", "danger")
+            end
+        end)
     end
 end
 

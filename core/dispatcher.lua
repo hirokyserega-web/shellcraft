@@ -142,6 +142,53 @@ function dispatcher:requeue(task, reason)
     emit(self, "task_requeued", { id = task.id, reason = reason or "unknown" })
 end
 
+--- Отменить активную задачу.
+-- Если задача выполняется на воркере, шлёт net.MSG.CRAFT_CANCEL.
+-- Помечает задачу как failed и отменяет зависимые задачи.
+function dispatcher:cancelTask(taskId, reason)
+    reason = reason or "Cancelled by user"
+    local task = self.tasks[taskId]
+    if not task then
+        return false, "Task not found"
+    end
+    
+    if task.status == "done" or task.status == "failed" then
+        return false, "Task already finished"
+    end
+    
+    -- Если назначена воркеру, шлём отмену и освобождаем его
+    if task.worker_id then
+        if task.worker_id ~= "machine" then
+            local w = self.workers[task.worker_id]
+            if w and w.current_task and w.current_task.id == taskId then
+                pcall(function()
+                    net.send(task.worker_id, net.MSG.CRAFT_CANCEL, { task_id = taskId })
+                end)
+                self:collectResult(task.worker_id)
+                w.state = "free"
+                w.current_task = nil
+                w.task_started_at = nil
+                w.task_deadline = nil
+            end
+        end
+    end
+    
+    -- Удаляем из очереди
+    for i, qid in ipairs(self.queue) do
+        if qid == taskId then
+            table.remove(self.queue, i)
+            break
+        end
+    end
+    
+    task.status = "failed"
+    task.result = reason
+    emit(self, "task_failed", { id = taskId, error = reason })
+    self:failDependents(taskId, reason)
+    
+    return true
+end
+
 --- Подготовить ингредиенты: extract из хранилища ПРЯМО в инвентарь черепахи.
 function dispatcher:prepareIngredients(workerId, task)
     local turtleName = self:workerName(workerId)

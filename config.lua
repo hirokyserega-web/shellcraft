@@ -69,7 +69,8 @@ local function isMachine(name)
     local p = peripheral.wrap(name)
     if not p then return false end
     if type(p.list) ~= "function" or type(p.size) ~= "function" then return false end
-    local ptype = peripheral.getType(name)
+    local ptype = (peripheral.getType(name) or "unknown"):lower()
+    
     -- Известные типы машин
     local known = {
         ["minecraft:furnace"] = true,
@@ -78,15 +79,47 @@ local function isMachine(name)
         ["minecraft:brewer"] = true,
         ["create:millstone"] = true,
         ["create:crushing_wheels"] = true,
-        -- Для обратной совместимости
         furnace = true,
         blast_furnace = true,
         smoker = true,
         brewer = true,
     }
     if known[ptype] then return true end
-    -- Эвристика: печь имеет getBurnTime или getSize возвращает 3
     if type(p.getBurnTime) == "function" then return true end
+
+    -- Если имя типа содержит слова-маркеры машин:
+    local machineKeywords = {
+        "furnace", "smelt", "mill", "crush", "press", "cook", "kiln", "grind",
+        "pulveriz", "saw", "centrifug", "extract", "compress", "assembl", "machine",
+        "alloy", "sieve", "enrich", "infus", "crystalliz", "dissolv", "washer",
+        "purif", "recombin", "charg", "generat", "reactor", "combiner", "crafter", "metal"
+    }
+    for _, kw in ipairs(machineKeywords) do
+        if ptype:find(kw) then
+            return true
+        end
+    end
+
+    -- Если это инвентарь, но НЕ является сундуком/бочкой/хранилищем
+    local storageKeywords = {
+        "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer",
+        "cabinet", "box", "bag", "dank", "safe", "pocket"
+    }
+    local isStorage = false
+    for _, kw in ipairs(storageKeywords) do
+        if ptype:find(kw) then
+            isStorage = true
+            break
+        end
+    end
+
+    if not isStorage then
+        local sz = p.size()
+        if sz and sz <= 6 then
+            return true
+        end
+    end
+    
     return false
 end
 

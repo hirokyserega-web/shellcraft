@@ -1,12 +1,11 @@
 -- core/machines.lua
--- Работа со спец-механизмами (печь, blast_furnace, smoker, и т.п.).
--- Цикл: положить вход -> дождаться -> забрать результат -> вернуть в хранилище.
+-- Management for universal processing stations (machines, mixers, furnaces, etc.).
+-- Uses asynchronous FSM ticks instead of blocking sleep loops.
 
 local machines = {}
 machines.__index = machines
 
---- Раскладка слотов по типу машины.
--- {input=..., fuel=..., output=...}
+-- Helper slot layouts for basic vanilla furnaces
 machines.SLOTS = {
     ["minecraft:furnace"]       = { input = {1}, fuel = {2}, output = {3} },
     ["minecraft:blast_furnace"] = { input = {1}, fuel = {2}, output = {3} },
@@ -18,19 +17,34 @@ machines.SLOTS = {
     brewer        = { input = {1, 2, 3}, fuel = {4}, output = {5} },
 }
 
---- Создать объект управления машинами.
--- @param peripherals таблица из config.resolve() -> .machines = {имена}
--- @param storage объект storage
-function machines.new(peripherals, storage)
+local function wrap(name)
+    if not peripheral.isPresent(name) then return nil end
+    return peripheral.wrap(name)
+end
+
+local function getCycles(recipe, count)
+    if recipe.type == "station" then
+        if recipe.output and recipe.output > 0 then
+            return math.ceil(count / recipe.output)
+        elseif recipe.fluidOutput and recipe.fluidOutput[1] then
+            return math.ceil(count / recipe.fluidOutput[1].mb)
+        end
+        return count
+    else
+        return math.ceil(count / (recipe.output or 1))
+    end
+end
+
+--- Create a machines manager.
+function machines.new(peripherals, storage, fluids)
     local self = setmetatable({}, machines)
     self.storage = storage
+    self.fluids = fluids
     self.names = {}
-    if peripherals and peripherals.machines then
-        for _, name in ipairs(peripherals.machines) do
-            table.insert(self.names, name)
-        end
-    end
+    self.jobs = {}
     self.onEvent = nil
+    
+    self:refreshStations(peripherals)
     return self
 end
 
@@ -42,23 +56,81 @@ local function emit(self, etype, payload)
     if self.onEvent then self.onEvent(etype, payload) end
 end
 
-local function wrap(name)
-    if not peripheral.isPresent(name) then return nil end
-    return peripheral.wrap(name)
+--- Detect capabilities of a peripheral.
+function machines:caps(name)
+    local p = wrap(name)
+    if not p then return { inventory = false, fluid = false, energy = false, type = "none" } end
+    local ptype = peripheral.getType(name) or "unknown"
+    local hasInv = peripheral.hasType(name, "inventory") or (p.list ~= nil and p.size ~= nil)
+    local hasFluid = peripheral.hasType(name, "fluid_storage") or (p.tanks ~= nil)
+    local hasEnergy = peripheral.hasType(name, "energy_storage") or (p.getEnergy ~= nil and p.getEnergyCapacity ~= nil)
+    return {
+        inventory = hasInv,
+        fluid = hasFluid,
+        energy = hasEnergy,
+        type = ptype
+    }
 end
 
---- Определить слоты для машины по типу.
+--- Determine if a peripheral is a processing station.
+function machines:isStation(name)
+    -- 1. Exclude item storage chests
+    if self.storage and self.storage.names then
+        for _, sn in ipairs(self.storage.names) do
+            if sn == name then return false end
+        end
+    end
+    -- 2. Exclude danks
+    if self.fluids and self.fluids.danks then
+        for _, dk in ipairs(self.fluids.danks) do
+            if dk.periph == name then return false end
+        end
+    end
+    -- 3. Exclude fluid pool tanks
+    if self.fluids and self.fluids.pool_names then
+        for _, pn in ipairs(self.fluids.pool_names) do
+            if pn == name then return false end
+        end
+    end
+    
+    -- 4. Must have inventory or fluid capability
+    local c = self:caps(name)
+    return c.inventory or c.fluid
+end
+
+--- Refresh the list of active stations on the network.
+function machines:refreshStations(peripherals)
+    self.names = {}
+    local localMachines = peripherals and peripherals.machines or {}
+    
+    -- Use manual configuration if present
+    if #localMachines > 0 then
+        for _, name in ipairs(localMachines) do
+            if peripheral.isPresent(name) then
+                table.insert(self.names, name)
+            end
+        end
+        return
+    end
+    
+    -- Auto-detect all stations
+    for _, name in ipairs(peripheral.getNames()) do
+        if self:isStation(name) then
+            table.insert(self.names, name)
+        end
+    end
+end
+
+--- Get slot layout for basic vanilla furnaces.
 function machines:_slots(name)
     local ptype = peripheral.getType(name)
     if machines.SLOTS[ptype] then
         return machines.SLOTS[ptype], ptype
     end
-    -- Check base type if namespaced type not found in SLOTS
     local _, base = ptype:match("^([^:]+):(.+)$")
     if base and machines.SLOTS[base] then
         return machines.SLOTS[base], ptype
     end
-    -- Эвристика: size() == 3 -> печь, иначе input=первый, output=последний
     local p = wrap(name)
     if not p or not p.size then return nil, ptype end
     local sz = p.size()
@@ -70,53 +142,98 @@ function machines:_slots(name)
     return { input = {1}, fuel = {}, output = {2} }, ptype
 end
 
---- Информация о машине (тип, занятость, что готовится).
--- @return { name, type, busy, cooking, input_items, output_items, fuel }
+--- Get machine info including inventory, fluids, energy, and state.
 function machines:info(name)
     local p = wrap(name)
-    if not p or type(p.list) ~= "function" then return nil end
+    if not p then return nil end
     local slots, ptype = self:_slots(name)
-    local ok, list = pcall(p.list)
-    if not ok or not list then return nil end
+    local c = self:caps(name)
+    
     local info = {
         name = name,
         type = ptype,
         slots = slots,
         busy = false,
         cooking = false,
+        ready = false,
         input_items = {},
         output_items = {},
         fuel = 0,
+        energy = nil,
+        tanks = nil,
+        inventory_size = 0
     }
-    local function isFilled(slot)
-        return list[slot] ~= nil
-    end
-    -- Проверяем топливо
-    if slots.fuel and #slots.fuel > 0 then
-        for _, s in ipairs(slots.fuel) do
-            if isFilled(s) then info.fuel = info.fuel + 1 end
+    
+    -- Read inventory details if present
+    if c.inventory and p.list then
+        local ok, list = pcall(p.list)
+        if ok and list then
+            info.inventory_size = p.size() or 0
+            local function isFilled(slot) return list[slot] ~= nil end
+            if slots and slots.fuel then
+                for _, s in ipairs(slots.fuel) do
+                    if isFilled(s) then info.fuel = info.fuel + 1 end
+                end
+            end
+            if slots and slots.input then
+                for _, s in ipairs(slots.input) do
+                    if isFilled(s) then
+                        table.insert(info.input_items, list[s].name)
+                        info.cooking = true
+                    end
+                end
+            end
+            if slots and slots.output then
+                for _, s in ipairs(slots.output) do
+                    if isFilled(s) then
+                        table.insert(info.output_items, list[s].name .. " x" .. list[s].count)
+                    end
+                end
+            end
+            info.busy = info.cooking and #info.output_items == 0
+            info.ready = #info.output_items > 0
         end
     end
-    -- Вход
-    for _, s in ipairs(slots.input) do
-        if isFilled(s) then
-            table.insert(info.input_items, list[s].name)
-            info.cooking = true
+    
+    -- Read fluid details if present
+    if c.fluid and p.tanks then
+        local ok, tks = pcall(p.tanks)
+        if ok and tks then
+            info.tanks = tks
+            local totalMb = 0
+            for _, t in ipairs(tks) do
+                totalMb = totalMb + (t.amount or 0)
+            end
+            if totalMb > 0 and not info.ready then
+                info.cooking = true
+            end
         end
     end
-    -- Выход
-    for _, s in ipairs(slots.output) do
-        if isFilled(s) then
-            table.insert(info.output_items, list[s].name .. " x" .. list[s].count)
+    
+    -- Read energy details if present
+    if c.energy then
+        local ok, energy = pcall(p.getEnergy)
+        local ok2, maxEnergy = pcall(p.getEnergyCapacity)
+        if ok and ok2 then
+            info.energy = { current = energy, max = maxEnergy }
         end
     end
-    info.busy = info.cooking and #info.output_items == 0
-    -- Если есть результат, но нет входа — готово, ждёт извлечения
-    info.ready = #info.output_items > 0
+    
+    -- Check if it is currently locked by a job
+    for _, job in pairs(self.jobs) do
+        if job.name == name and job.state ~= "done" and job.state ~= "error" then
+            info.busy = true
+            break
+        end
+    end
+    
     return info
 end
 
---- Список всех машин с информацией (для UI).
+--- Get status of a machine (alias for info).
+machines.status = machines.info
+
+--- List all connected stations with their info.
 function machines:list()
     local arr = {}
     for _, name in ipairs(self.names) do
@@ -126,21 +243,16 @@ function machines:list()
     return arr
 end
 
---- Сколько машин подключено.
+--- Count of connected stations.
 function machines:count()
     return #self.names
 end
 
---- Alias info -> status (для UI, более короткое имя).
-machines.status = machines.info
-
---- Найти свободную машину нужного типа.
--- @param machineType тип (например "furnace")
--- @return имя машины или nil
+--- Find a free station matching the type.
 function machines:findFree(machineType)
     local function matchType(ptype, mtype)
         if not ptype or not mtype then return false end
-        if ptype == mtype then return true end
+        if ptype == mtype or mtype == "any" then return true end
         local p_ns, p_base = ptype:match("^([^:]+):(.+)$")
         local m_ns, m_base = mtype:match("^([^:]+):(.+)$")
         p_base = p_base or ptype
@@ -149,128 +261,265 @@ function machines:findFree(machineType)
         return p_base == m_base
     end
 
+    local function isClaimed(mname)
+        for _, job in pairs(self.jobs) do
+            if job.name == mname and job.state ~= "done" and job.state ~= "error" then
+                return true
+            end
+        end
+        return false
+    end
+
     for _, name in ipairs(self.names) do
-        local ptype = peripheral.getType(name)
-        local match = (machineType == nil) or matchType(ptype, machineType) or
-                      (ptype and machineType and ptype:find(machineType, 1, true) ~= nil)
-        if match then
-            local inf = self:info(name)
-            if inf and not inf.cooking and not inf.ready then
-                return name
+        if not isClaimed(name) then
+            local ptype = peripheral.getType(name)
+            local match = (machineType == nil) or matchType(ptype, machineType) or
+                          (ptype and machineType and ptype:find(machineType, 1, true) ~= nil)
+            if match then
+                local inf = self:info(name)
+                if inf and not inf.cooking and not inf.ready then
+                    return name
+                end
             end
         end
     end
     return nil
 end
 
---- Положить входные предметы в машину.
--- @param name имя машины
--- @param ingredients массив { {id, count} }
--- @return true если всё положили
-function machines:_feed(name, ingredients)
-    local slots = self:_slots(name)
-    if not slots then return false, "unknown slot layout" end
-    for i, ing in ipairs(ingredients) do
-        local targetSlot = slots.input[i] or slots.input[1]
-        local moved = self.storage:extract(ing.id, ing.count, name, targetSlot)
-        if moved < ing.count then
-            return false, "missing " .. (ing.count - moved) .. " " .. lang.localize(ing.id)
+--- Feed items and fluids into the station.
+function machines:feed(name, recipe, cycles)
+    -- 1. Items
+    if recipe.itemInput then
+        for _, ing in ipairs(recipe.itemInput) do
+            local need = ing.count * cycles
+            local moved = self.storage:extract(ing.id, need, name, nil)
+            if moved < need then
+                return false, "missing " .. (need - moved) .. " " .. ing.id
+            end
+        end
+    elseif recipe.type == "machine" and recipe.input then
+        -- Backward-compatibility with old machine recipes
+        for _, ing in ipairs(recipe.input) do
+            local need = ing.count * cycles
+            local moved = self.storage:extract(ing.id, need, name, nil)
+            if moved < need then
+                return false, "missing " .. (need - moved) .. " " .. ing.id
+            end
         end
     end
+
+    -- 2. Fluids
+    if recipe.fluidInput then
+        for _, fl in ipairs(recipe.fluidInput) do
+            local need = fl.mb * cycles
+            local moved = self.fluids:extractFluid(fl.fluid, need, name)
+            if moved < need then
+                return false, "missing " .. (need - moved) .. "mB " .. fl.fluid
+            end
+        end
+    end
+
     return true
 end
 
---- Ждать результат с таймаутом.
--- @param name имя машины
--- @param timeout секунд
--- @return true если результат появился
-function machines:_waitResult(name, timeout)
-    timeout = timeout or 60
-    local slots = self:_slots(name)
-    if not slots then return false end
+--- Check if the expected outputs are present.
+function machines:ready(name, recipe, cycles)
     local p = wrap(name)
-    if not p or type(p.list) ~= "function" then return false end
-    local deadline = os.clock() + timeout
-    while os.clock() < deadline do
+    if not p then return false end
+    
+    -- Check items output
+    if recipe.itemOutput and #recipe.itemOutput > 0 then
+        if not p.list then return false end
+        local ok, list = pcall(p.list)
+        if not ok or not list then return false end
+        for _, out in ipairs(recipe.itemOutput) do
+            local targetCount = out.count * cycles
+            local currentCount = 0
+            for _, info in pairs(list) do
+                if info.name == out.id then
+                    currentCount = currentCount + (info.count or 0)
+                end
+            end
+            if currentCount < targetCount then
+                return false
+            end
+        end
+    end
+
+    -- Check fluids output
+    if recipe.fluidOutput and #recipe.fluidOutput > 0 then
+        if not p.tanks then return false end
+        local ok, tks = pcall(p.tanks)
+        if not ok or not tks then return false end
+        for _, out in ipairs(recipe.fluidOutput) do
+            local targetMb = out.mb * cycles
+            local currentMb = 0
+            for _, t in ipairs(tks) do
+                local fName = t.name or t.fluid
+                if fName == out.fluid then
+                    currentMb = currentMb + (t.amount or 0)
+                end
+            end
+            if currentMb < targetMb then
+                return false
+            end
+        end
+    end
+
+    -- Fallback for old-style machine recipes
+    if recipe.type == "machine" and not recipe.itemOutput then
+        local slots = self:_slots(name)
+        if not slots or not slots.output then return false end
+        if not p.list then return false end
+        local ok, list = pcall(p.list)
+        if not ok or not list then return false end
+        local hasResult = false
+        for _, s in ipairs(slots.output) do
+            if list[s] ~= nil then hasResult = true; break end
+        end
+        return hasResult
+    end
+
+    return true
+end
+
+--- Collect produced items and fluids back to storage.
+function machines:collect(name, recipe)
+    local p = wrap(name)
+    if not p then return 0 end
+    local moved = 0
+
+    -- 1. Collect items
+    if p.list then
         local ok, list = pcall(p.list)
         if ok and list then
-            local hasResult = false
-            for _, s in ipairs(slots.output) do
-                if list[s] ~= nil then hasResult = true; break end
+            -- Build set of input items to avoid pulling them
+            local inputs = {}
+            if recipe.itemInput then
+                for _, ing in ipairs(recipe.itemInput) do inputs[ing.id] = true end
+            elseif recipe.input then
+                for _, ing in ipairs(recipe.input) do inputs[ing.id or ing] = true end
             end
-            if hasResult then return true end
+            
+            -- Pull output items or anything that is NOT an input ingredient
+            for slot, info in pairs(list) do
+                if info.name and not inputs[info.name] then
+                    local n = self.storage:deposit(name, slot, nil)
+                    moved = moved + n
+                end
+            end
         end
-        os.sleep(0.5)
     end
-    return false, "timeout waiting for result"
+
+    -- 2. Collect fluids
+    if recipe.fluidOutput then
+        for _, fo in ipairs(recipe.fluidOutput) do
+            local n = self.fluids:depositFluid(name, fo.fluid)
+            moved = moved + n
+        end
+    end
+
+    return moved
 end
 
---- Забрать результат из машины в хранилище.
--- @return сколько перемещено
-function machines:_collect(name)
-    local slots = self:_slots(name)
-    if not slots then return 0 end
-    local total = 0
-    for _, s in ipairs(slots.output) do
-        local n = self.storage:deposit(name, s, nil)
-        total = total + n
-    end
-    return total
-end
-
---- Полный цикл обработки машиной.
--- @param recipe рецепт типа "machine" (machine, input, output, id)
--- @param count сколько штук результата нужно
--- @return true, перемещено | false, ошибка
-function machines:process(recipe, count)
-    if not recipe or recipe.type ~= "machine" then
-        return false, "recipe not for machine"
-    end
-    -- Сколько циклов машины нужно
-    local output = recipe.output or 1
-    local cycles = math.ceil(count / output)
-    local need = cycles * output
-    -- Масштабируем вход на cycles
-    local input = {}
-    for _, ing in ipairs(recipe.input or {}) do
-        table.insert(input, { id = ing.id, count = ing.count * cycles })
-    end
-    -- Ищем свободную машину
+--- Submit a processing job asynchronously.
+function machines:submit(recipe, count, onDone)
     local machineName = self:findFree(recipe.machine)
     if not machineName then
-        return false, "no free machine of type " .. tostring(recipe.machine)
+        return nil, "no free machine of type " .. tostring(recipe.machine)
     end
-    emit(self, "machine_start", { name = machineName, recipe = recipe.id, count = need })
-    local t0 = os.epoch("utc")
-    -- Кладём вход
-    local ok, err = self:_feed(machineName, input)
-    if not ok then
-        emit(self, "machine_error", { name = machineName, error = err })
-        return false, err
-    end
-    -- Ждём (таймаут ~ 10 сек на цикл)
-    local waitOk, werr = self:_waitResult(machineName, math.max(60, cycles * 10))
-    if not waitOk then
-        emit(self, "machine_error", { name = machineName, error = werr })
-        return false, werr
-    end
-    -- Забираем результат
-    local moved = self:_collect(machineName)
-    local t1 = os.epoch("utc")
-    local elapsed = (t1 - t0) / 1000
-    if elapsed < 0 then elapsed = 0 end
-    emit(self, "machine_done", { name = machineName, recipe = recipe.id, count = moved })
-    return true, moved, elapsed, cycles
+    
+    local jobId = "job_" .. math.floor(os.clock() * 1000) .. "_" .. math.random(1, 1000)
+    self.jobs[jobId] = {
+        id = jobId,
+        name = machineName,
+        recipe = recipe,
+        count = count,
+        state = "feeding",
+        started_at = os.clock(),
+        deadline = nil,
+        onDone = onDone
+    }
+    
+    emit(self, "machine_start", { name = machineName, recipe = recipe.id, count = count })
+    return jobId
 end
 
---- Проверка/перебор готовых машин (собрать результаты, что уже готовы).
--- Вызывается сервером периодически.
+--- Tick the asynchronous FSM of active jobs.
+function machines:tick()
+    for jobId, job in pairs(self.jobs) do
+        local cycles = getCycles(job.recipe, job.count)
+        
+        if job.state == "feeding" then
+            local ok, err = self:feed(job.name, job.recipe, cycles)
+            if ok then
+                job.state = "processing"
+                job.started_at = os.clock()
+                local avgTime = job.recipe.avgTime or 10
+                job.deadline = os.clock() + math.max(30, cycles * avgTime * 3)
+            else
+                job.state = "error"
+                emit(self, "machine_error", { name = job.name, error = err })
+                if job.onDone then job.onDone(false, err) end
+                self.jobs[jobId] = nil
+            end
+            
+        elseif job.state == "processing" then
+            if self:ready(job.name, job.recipe, cycles) then
+                job.state = "collecting"
+            elseif os.clock() > job.deadline then
+                job.state = "error"
+                local err = "processing timeout"
+                emit(self, "machine_error", { name = job.name, error = err })
+                if job.onDone then job.onDone(false, err) end
+                self.jobs[jobId] = nil
+            end
+            
+        elseif job.state == "collecting" then
+            local moved = self:collect(job.name, job.recipe)
+            local elapsed = os.clock() - job.started_at
+            if elapsed < 0 then elapsed = 0 end
+            
+            job.state = "done"
+            emit(self, "machine_done", { name = job.name, recipe = job.recipe.id, count = moved })
+            if job.onDone then job.onDone(true, moved, elapsed, cycles) end
+            self.jobs[jobId] = nil
+        end
+    end
+end
+
+--- Unused in asynchronous mode but kept for backward compatibility signature
+function machines:process(recipe, count)
+    error("synchronous process() is deprecated, use submit()")
+end
+
+--- Collect outputs of any ready machines that are NOT in a job (for manual extraction support).
 function machines:collectReady()
     local total = 0
     for _, name in ipairs(self.names) do
-        local inf = self:info(name)
-        if inf and inf.ready then
-            total = total + self:_collect(name)
+        -- Skip machines claimed by active jobs
+        local claimed = false
+        for _, job in pairs(self.jobs) do
+            if job.name == name then claimed = true; break end
+        end
+        
+        if not claimed then
+            local inf = self:info(name)
+            if inf and inf.ready then
+                -- Try to find out what output it has
+                local p = wrap(name)
+                if p and p.list then
+                    local ok, list = pcall(p.list)
+                    if ok and list then
+                        for slot, info in pairs(list) do
+                            if info.name then
+                                local n = self.storage:deposit(name, slot, nil)
+                                total = total + n
+                            end
+                        end
+                    end
+                end
+            end
         end
     end
     return total

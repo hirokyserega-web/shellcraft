@@ -76,7 +76,20 @@ end
 
 --- Получить рецепт по id.
 function recipes:get(id)
-    return self.list[id]
+    if self.list[id] then return self.list[id] end
+    if type(id) == "string" and id:sub(1, 6) == "fluid:" then
+        local fluidName = id:sub(7)
+        for _, r in pairs(self.list) do
+            if r.fluidOutput then
+                for _, fo in ipairs(r.fluidOutput) do
+                    if fo.fluid == fluidName then
+                        return r
+                    end
+                end
+            end
+        end
+    end
+    return nil
 end
 
 --- Список всех рецептов (массив).
@@ -91,7 +104,7 @@ end
 
 --- Есть ли рецепт для id?
 function recipes:has(id)
-    return self.list[id] ~= nil
+    return self:get(id) ~= nil
 end
 
 --- Нормализованный список ингредиентов рецепта.
@@ -120,6 +133,11 @@ function recipes.ingredientsOf(recipe)
             local iid = ing.id or ing
             agg[iid] = (agg[iid] or 0) + (ing.count or 1)
         end
+    elseif (recipe.type == "station" or recipe.type == "machine") and recipe.itemInput then
+        for _, ing in ipairs(recipe.itemInput) do
+            local iid = ing.id
+            agg[iid] = (agg[iid] or 0) + (ing.count or 1)
+        end
     elseif recipe.type == "machine" and recipe.input then
         for _, ing in ipairs(recipe.input) do
             local iid = ing.id or ing
@@ -133,12 +151,33 @@ function recipes.ingredientsOf(recipe)
     return result
 end
 
---- Сколько крафтов нужно для wantCount штук результата.
-function recipes.craftsNeeded(recipe, wantCount)
-    return math.ceil(wantCount / (recipe.output or 1))
+--- Агрегированный массив входных жидкостей рецепта.
+function recipes.fluidsOf(recipe)
+    local result = {}
+    if recipe.fluidInput then
+        for _, f in ipairs(recipe.fluidInput) do
+            table.insert(result, { fluid = f.fluid, mb = f.mb })
+        end
+    end
+    table.sort(result, function(a, b) return a.fluid < b.fluid end)
+    return result
 end
 
---- Полная потребность в ингредиентах для wantCount штук результата.
+--- Сколько крафтов/циклов нужно для want штук/мБ результата.
+function recipes.craftsNeeded(recipe, want)
+    if recipe.type == "station" then
+        if recipe.output and recipe.output > 0 then
+            return math.ceil(want / recipe.output)
+        elseif recipe.fluidOutput and recipe.fluidOutput[1] then
+            return math.ceil(want / recipe.fluidOutput[1].mb)
+        end
+        return want
+    else
+        return math.ceil(want / (recipe.output or 1))
+    end
+end
+
+--- Полная потребность в ингредиентах для want штук результата.
 -- Возвращает массив { {id, count} }.
 function recipes.ingredientsFor(recipe, wantCount)
     local crafts = recipes.craftsNeeded(recipe, wantCount)
@@ -146,6 +185,18 @@ function recipes.ingredientsFor(recipe, wantCount)
     local result = {}
     for _, ing in ipairs(ings) do
         table.insert(result, { id = ing.id, count = ing.count * crafts })
+    end
+    return result, crafts
+end
+
+--- Полная потребность в жидкостях для want штук результата.
+-- Возвращает массив { {fluid, mb} }.
+function recipes.fluidsFor(recipe, wantCount)
+    local crafts = recipes.craftsNeeded(recipe, wantCount)
+    local fls = recipes.fluidsOf(recipe)
+    local result = {}
+    for _, f in ipairs(fls) do
+        table.insert(result, { fluid = f.fluid, mb = f.mb * crafts })
     end
     return result, crafts
 end
@@ -679,6 +730,103 @@ function recipes:updateTiming(id, perOpSec)
     r.samples = (r.samples or 0) + 1
     r.timingCount = r.samples
     self:save()
+end
+
+local function wrap(name)
+    if not peripheral.isPresent(name) then return nil end
+    return peripheral.wrap(name)
+end
+
+--- Сделать снимок инвентаря и баков конкретной станции
+function recipes.snapshotStation(name)
+    local p = wrap(name)
+    if not p then return { items = {}, fluids = {} } end
+    local items = {}
+    local fluids = {}
+    
+    -- Предметы
+    if p.list and p.size then
+        local ok, list = pcall(p.list)
+        if ok and list then
+            for slot, info in pairs(list) do
+                if info.name then
+                    items[info.name] = (items[info.name] or 0) + (info.count or 0)
+                end
+            end
+        end
+    end
+    
+    -- Жидкости
+    if p.tanks then
+        local ok, tks = pcall(p.tanks)
+        if ok and tks then
+            for _, t in ipairs(tks) do
+                local fName = t.name or t.fluid
+                if fName and t.amount and t.amount > 0 then
+                    fluids[fName] = (fluids[fName] or 0) + t.amount
+                end
+            end
+        end
+    end
+    
+    return { items = items, fluids = fluids }
+end
+
+--- Сделать полный снимок для обучения (сундук + станция + баки)
+function recipes.snapshotAll(stationName, inputChestName, storageObj, fluidsObj)
+    local items = {}
+    local fluids = {}
+    
+    -- 1. Предметы в input chest
+    if inputChestName then
+        local p = wrap(inputChestName)
+        if p and p.list then
+            local ok, list = pcall(p.list)
+            if ok and list then
+                for _, info in pairs(list) do
+                    if info.name then
+                        items[info.name] = (items[info.name] or 0) + (info.count or 0)
+                    end
+                end
+            end
+        end
+    end
+    
+    -- 2. Предметы и жидкости в самой станции
+    if stationName then
+        local snap = recipes.snapshotStation(stationName)
+        for id, qty in pairs(snap.items) do
+            items[id] = (items[id] or 0) + qty
+        end
+        for f, mb in pairs(snap.fluids) do
+            fluids[f] = (fluids[f] or 0) + mb
+        end
+    end
+    
+    -- 3. Жидкости в данках и пуле
+    if fluidsObj then
+        -- Обновляем кеш жидкостей
+        fluidsObj:scan()
+        
+        -- Общий пул
+        if fluidsObj.cache then
+            for f, info in pairs(fluidsObj.cache) do
+                fluids[f] = (fluids[f] or 0) + info.total
+            end
+        end
+        
+        -- Данки
+        if fluidsObj.danks then
+            for _, dk in ipairs(fluidsObj.danks) do
+                local info = fluidsObj.dank_cache[dk.periph]
+                if info and info.current_mb > 0 then
+                    fluids[dk.fluid] = (fluids[dk.fluid] or 0) + info.current_mb
+                end
+            end
+        end
+    end
+    
+    return { items = items, fluids = fluids }
 end
 
 return recipes

@@ -18,10 +18,11 @@ end
 --- Создать диспетчер.
 -- @param storage объект storage
 -- @param machines объект machines (опц., для машинных рецептов)
-function dispatcher.new(storage, machines)
+function dispatcher.new(storage, machines, fluids)
     local self = setmetatable({}, dispatcher)
     self.storage = storage
     self.machines = machines
+    self.fluids = fluids
     self.workers = {}     -- [id] = { info, state, current_task, last_seen, task_started_at, task_deadline, turtle_name }
     self.tasks = {}       -- [task_id] = task
     self.queue = {}       -- массив task_id
@@ -297,7 +298,7 @@ function dispatcher:tick()
     end
 
     -- Машинные рецепты обрабатывает сам Core через machines
-    if task.recipe.type == "machine" then
+    if task.recipe.type == "machine" or task.recipe.type == "station" then
         if not self.machines then
             task.status = "failed"
             task.result = "machine module not connected"
@@ -307,21 +308,28 @@ function dispatcher:tick()
         end
         task.status = "running"
         task.worker_id = "machine"
-        emit(self, "task_started", { id = task.id, worker = "machine", recipe = task.recipe.id })
-        local ok, res, elapsed, cycles = self.machines:process(task.recipe, task.count)
-        if ok then
-            -- Обновляем avgTime рецепта (время на 1 цикл машины)
-            if self.recipes and elapsed and cycles and cycles > 0 then
-                self.recipes:updateTiming(task.recipe.id, elapsed / cycles)
+        emit(self, "task_started", { id = task.id, worker = "machine", recipe = task.recipe.id, count = task.count })
+        local jobId, err = self.machines:submit(task.recipe, task.count, function(success, res, elapsed, cycles)
+            if success then
+                -- Обновляем avgTime рецепта (время на 1 цикл машины)
+                if self.recipes and elapsed and cycles and cycles > 0 then
+                    self.recipes:updateTiming(task.recipe.id, elapsed / cycles)
+                end
+                task.status = "done"
+                task.result = { success = true, count = res }
+                emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = res })
+            else
+                task.status = "failed"
+                task.result = { success = false, error = res }
+                emit(self, "task_failed", { id = task.id, error = tostring(res) })
+                self:failDependents(task.id, tostring(res))
             end
-            task.status = "done"
-            task.result = { success = true, count = res }
-            emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = res })
-        else
-            task.status = "failed"
-            task.result = { success = false, error = res }
-            emit(self, "task_failed", { id = task.id, error = tostring(res) })
-            self:failDependents(task.id, tostring(res))
+        end)
+        if not jobId then
+            -- Если нет свободной машины, возвращаем обратно в очередь для повтора
+            table.insert(self.queue, task.id)
+            task.status = "queued"
+            task.worker_id = nil
         end
         return
     end
@@ -531,13 +539,18 @@ function dispatcher:requestCraft(id, count, recipes)
     if not recipes:has(id) then
         return nil, "No recipe for " .. lang.localize(id)
     end
-    local tree = planner.buildTree(id, count, recipes, self.storage)
-    local can, avail = planner.canCraft(tree, self.storage)
+    local tree = planner.buildTree(id, count, recipes, self.storage, self.fluids)
+    local can, avail = planner.canCraft(tree, self.storage, self.fluids)
     if not can then
         local missing = {}
-        for mid, info in pairs(avail) do
+        for mid, info in pairs(avail.items) do
             if info.missing > 0 then
                 table.insert(missing, lang.localize(mid) .. " (need " .. info.needed .. ", have " .. info.available .. ", missing " .. info.missing .. ")")
+            end
+        end
+        for mfluid, info in pairs(avail.fluids) do
+            if info.missing > 0 then
+                table.insert(missing, lang.localize("fluid:" .. mfluid) .. " (need " .. info.needed .. "mB, have " .. info.available .. "mB, missing " .. info.missing .. "mB)")
             end
         end
         return nil, "Missing resources: " .. table.concat(missing, "; ")

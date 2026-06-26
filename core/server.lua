@@ -26,13 +26,16 @@ function server.run()
     st:scan()
     util.info("Storage scanned: " .. #st:items() .. " item types")
 
+    local fl = fluids.new(cfg.peripherals, st)
+    fl:scan()
+    util.info("Fluids scanned: " .. #fl:fluids() .. " fluid types")
+
     local rec = recipes.new(cfg.recipes_file)
     util.info("Loaded recipes: " .. #(rec:all()))
 
-    local mach = machines.new(cfg.peripherals, st)
+    local mach = machines.new(cfg.peripherals, st, fl)
 
-    local disp = dispatcher.new(st)
-    disp.machines = mach
+    local disp = dispatcher.new(st, mach, fl)
     disp.recipes = rec
     if cfg.task_timeout then disp.task_timeout = cfg.task_timeout end
     if cfg.heartbeat_grace then disp.heartbeat_grace = cfg.heartbeat_grace end
@@ -98,7 +101,7 @@ function server.run()
         pcall(monitor.setTextScale, scale)
     end
     uiInstance = ui.new(monitor, {
-        storage = st, recipes = rec, dispatcher = disp,
+        storage = st, fluids = fl, recipes = rec, dispatcher = disp,
         machines = mach, lang = names,
     })
     uiInstance:addLog("ShellCraft Core started")
@@ -136,10 +139,18 @@ function server.run()
         end
     end
 
+    local function machineLoop()
+        while true do
+            mach:tick()
+            os.sleep(0.25)
+        end
+    end
+
     local function storageScanLoop()
         local lastSaveTime = os.clock()
         while true do
             st:scan()
+            fl:scan()
             mach:collectReady()
             -- Периодически пополняем кеш имён и сбрасываем на диск только при новых ID или раз в 60с
             local newItems = false
@@ -213,6 +224,7 @@ function server.run()
     parallel.waitForAny(
         netListener,
         schedulerLoop,
+        machineLoop,
         storageScanLoop,
         discoveryLoop,
         uiLoop

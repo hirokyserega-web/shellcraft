@@ -177,6 +177,14 @@ shellcraft/
 - UI и сетевой слушатель работают параллельно через `parallel.waitForAny`.
 - Ошибки (нет ингредиента, воркер недоступен, машина занята) логируются и показываются в UI.
 
+## Fluid & Machine Limitations
+
+- **Turtles cannot carry fluids**: All fluid transfer is performed Core-side via wired modems. Tanks and machines must be connected to the same wired modem network as the Core and enabled (glowing red).
+- **Core-Side Routing Only**: ShellCraft only handles item/fluid movement and timing. External power (Create rotation, IC2 EU, heat, RF) must be supplied manually by your build.
+- **Energy Display**: Energy is displayed in FE (Forge Energy) only. IC2 EU is generally not readable by ComputerCraft and will show as N/A.
+- **Snapshot learning**: The auto-learning snapshot recorder requires the station/machine to finish one full manual processing cycle before you click "Finish & Save".
+- **Danks**: A "dank" is a dedicated fluid tank on the wired network reserved for a single fluid. ShellCraft tracks its fill level and uses it as the primary supply source for recipes before falling back to the general pool. All danks configuration is saved in `config.local.lua`.
+
 ## Лицензия
 
 MIT — см. `LICENSE`.

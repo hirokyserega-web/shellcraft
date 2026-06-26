@@ -11,16 +11,27 @@ local planner = {}
 -- @param storage объект storage (опц., для проверки наличия базовых)
 -- @param depth защита от зацикливания
 -- @return node = { id, count, has_recipe, recipe, children, needed, available, missing, crafts }
-function planner.buildTree(id, count, recipes, storage, depth, allocated)
+function planner.buildTree(id, count, recipes, storage, fluids, depth, allocated)
     depth = depth or 0
     allocated = allocated or {}
     if depth > 32 then
         return { id = id, count = count, has_recipe = false, error = "Dependency too deep" }
     end
-    local node = { id = id, count = count, children = {} }
+    
+    local isFluid = (type(id) == "string" and id:sub(1, 6) == "fluid:")
+    local kind = isFluid and "fluid" or "item"
+    local actualId = isFluid and id:sub(7) or id
+    
+    local node = { id = id, count = count, kind = kind, children = {} }
     local recipe = recipes:get(id)
 
-    local available = storage and storage:count(id) or 0
+    local available = 0
+    if isFluid then
+        available = fluids and fluids:count(actualId) or 0
+    else
+        available = storage and storage:count(id) or 0
+    end
+    
     local alreadyAllocated = allocated[id] or 0
     local remaining = math.max(0, available - alreadyAllocated)
     local taken = math.min(count, remaining)
@@ -39,14 +50,24 @@ function planner.buildTree(id, count, recipes, storage, depth, allocated)
             node.count = deficit
             node.crafts = recipes.craftsNeeded(recipe, deficit)
             node.output = recipe.output or 1
+            
+            -- Ingredients (items)
             local ings = recipes.ingredientsFor(recipe, deficit)
             for _, ing in ipairs(ings) do
-                local child = planner.buildTree(ing.id, ing.count, recipes, storage, depth + 1, allocated)
+                local child = planner.buildTree(ing.id, ing.count, recipes, storage, fluids, depth + 1, allocated)
+                table.insert(node.children, child)
+            end
+            
+            -- Fluids (liquids)
+            local fls = recipes.fluidsFor(recipe, deficit)
+            for _, fl in ipairs(fls) do
+                local fluidNodeId = "fluid:" .. fl.fluid
+                local child = planner.buildTree(fluidNodeId, fl.mb, recipes, storage, fluids, depth + 1, allocated)
                 table.insert(node.children, child)
             end
         end
     else
-        -- Базовый ресурс: нет рецепта.
+        -- Base resource: no recipe.
         node.has_recipe = false
         node.needed = count
         node.available = available
@@ -57,9 +78,10 @@ end
 
 --- Суммарная потребность в базовых ресурсах (bill of materials).
 -- @param node дерево из buildTree
--- @return таблица { [id] = total_count }
+-- @return таблица { items = { [id] = count }, fluids = { [fluid] = mb } }
 function planner.bom(node)
-    local result = {}
+    local items = {}
+    local fluids = {}
     local function traverse(n)
         if not n then return end
         if n.has_recipe then
@@ -67,49 +89,77 @@ function planner.bom(node)
                 traverse(child)
             end
         else
-            result[n.id] = (result[n.id] or 0) + n.count
+            if n.kind == "fluid" then
+                local fName = n.id:sub(7)
+                fluids[fName] = (fluids[fName] or 0) + n.count
+            else
+                items[n.id] = (items[n.id] or 0) + n.count
+            end
         end
     end
     traverse(node)
-    return result
+    return { items = items, fluids = fluids }
 end
 
 --- Суммарная потребность в базовых ресурсах как ОТСОРТИРОВАННЫЙ МАССИВ.
 -- Удобно для UI (отображение списка потребности).
 -- @param node дерево из buildTree
--- @return массив { { id = ..., count = ... } }, отсортированный по id
+-- @return таблица { items = { {id, count}, ... }, fluids = { {fluid, mb}, ... } }
 function planner.calculateBOM(node)
     local map = planner.bom(node)
-    local arr = {}
-    for id, count in pairs(map) do
-        table.insert(arr, { id = id, count = count })
+    
+    local items = {}
+    for id, count in pairs(map.items) do
+        table.insert(items, { id = id, count = count })
     end
-    table.sort(arr, function(a, b) return a.id < b.id end)
-    return arr
+    table.sort(items, function(a, b) return a.id < b.id end)
+    
+    local fluids = {}
+    for fluid, mb in pairs(map.fluids) do
+        table.insert(fluids, { fluid = fluid, mb = mb })
+    end
+    table.sort(fluids, function(a, b) return a.fluid < b.fluid end)
+    
+    return { items = items, fluids = fluids }
 end
 
 --- Проверить наличие базовых ресурсов по bom.
 -- @param bom таблица из bom()
 -- @param storage объект storage
--- @return { [id] = { needed, available, missing } }
-function planner.checkAvailability(bom, storage)
-    local result = {}
-    for id, count in pairs(bom) do
-        local available = storage:count(id) or 0
-        result[id] = {
+-- @param fluids объект fluids
+-- @return { items = { [id] = { needed, available, missing } }, fluids = { [fluid] = { needed, available, missing } } }
+function planner.checkAvailability(bom, storage, fluids)
+    local itemAvail = {}
+    for id, count in pairs(bom.items) do
+        local available = storage and storage:count(id) or 0
+        itemAvail[id] = {
             needed = count,
             available = available,
             missing = math.max(0, count - available),
         }
     end
-    return result
+    
+    local fluidAvail = {}
+    for fluid, mb in pairs(bom.fluids) do
+        local available = fluids and fluids:count(fluid) or 0
+        fluidAvail[fluid] = {
+            needed = mb,
+            available = available,
+            missing = math.max(0, mb - available),
+        }
+    end
+    
+    return { items = itemAvail, fluids = fluidAvail }
 end
 
 --- Можно ли скрафтить (хватает ли базовых ресурсов)?
-function planner.canCraft(node, storage)
+function planner.canCraft(node, storage, fluids)
     local bom = planner.bom(node)
-    local avail = planner.checkAvailability(bom, storage)
-    for _, info in pairs(avail) do
+    local avail = planner.checkAvailability(bom, storage, fluids)
+    for _, info in pairs(avail.items) do
+        if info.missing > 0 then return false, avail end
+    end
+    for _, info in pairs(avail.fluids) do
         if info.missing > 0 then return false, avail end
     end
     return true, avail

@@ -339,8 +339,18 @@ function dispatcher:handleMessage(senderId, msg)
             w.current_task = nil
         end
     elseif msg.type == net.MSG.HEARTBEAT then
-        if self.workers[senderId] then
-            self.workers[senderId].last_seen = os.clock()
+        local w = self.workers[senderId]
+        if w then
+            w.last_seen = os.clock()
+            local p = msg.payload or {}
+            if p.busy == false and w.state == "busy" then
+                util.warn("Worker #" .. tostring(senderId) .. " heartbeat claims idle, but server state is busy. Force resetting to free.")
+                if w.current_task then
+                    self:requeue(w.current_task)
+                end
+                w.state = "free"
+                w.current_task = nil
+            end
         end
     end
 end

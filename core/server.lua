@@ -51,7 +51,7 @@ function server.run()
             if etype == "task_done" then
                 uiInstance:taskDone()
             elseif etype == "task_failed" then
-                uiInstance:taskFailed()
+                uiInstance:taskFailed(payload and payload.error)
             end
         end
     end

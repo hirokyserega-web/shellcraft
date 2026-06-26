@@ -100,12 +100,18 @@ function recipes.ingredientsOf(recipe)
     local result = {}
     local agg = {}  -- [id] = count
     if recipe.type == "shaped" and recipe.pattern then
-        for _, row in ipairs(recipe.pattern) do
-            for _, cell in ipairs(row) do
-                if cell and cell.id then
-                    agg[cell.id] = (agg[cell.id] or 0) + (cell.count or 1)
-                elseif cell and type(cell) == "string" then
-                    agg[cell] = (agg[cell] or 0) + 1
+        for r = 1, 3 do
+            local row = recipe.pattern[r]
+            if row then
+                for c = 1, 3 do
+                    local cell = row[c]
+                    if cell then
+                        if type(cell) == "table" and cell.id then
+                            agg[cell.id] = (agg[cell.id] or 0) + (cell.count or 1)
+                        elseif type(cell) == "string" then
+                            agg[cell] = (agg[cell] or 0) + 1
+                        end
+                    end
                 end
             end
         end

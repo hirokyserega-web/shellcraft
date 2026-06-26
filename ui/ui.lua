@@ -48,10 +48,13 @@ function ui:taskDone()
 end
 
 --- Шаг крафта завершён с ошибкой.
-function ui:taskFailed()
+function ui:taskFailed(err)
     local a = self.state.craft.active
     if a then a.failed = (a.failed or 0) + 1 end
     self.dirty = true
+    if err then
+        self:showToast("Craft failed: " .. tostring(err), "danger")
+    end
 end
 
 --- Показать всплывающее Toast сообщение.

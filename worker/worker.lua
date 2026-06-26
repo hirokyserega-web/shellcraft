@@ -57,12 +57,17 @@ end
 local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
 local EXTRA_SLOTS = {4, 8, 12, 13, 14, 15, 16}
 
+local function hasContainer(dir)
+    local p = peripheral.wrap(dir)
+    return p ~= nil and type(p.list) == "function" and type(p.size) == "function"
+end
+
 --- Попытаться сбросить предмет во внешний инвентарь (соседний или на сети).
 local function dropToExternal(slot)
     turtle.select(slot)
-    if turtle.drop() then return true end
-    if turtle.dropUp() then return true end
-    if turtle.dropDown() then return true end
+    if hasContainer("front") and turtle.drop() then return true end
+    if hasContainer("top") and turtle.dropUp() then return true end
+    if hasContainer("bottom") and turtle.dropDown() then return true end
     
     local inv = peripheral.find("inventory")
     if inv then
@@ -78,15 +83,6 @@ local function dropToExternal(slot)
         end
     end
     return false
-end
-
---- Сбросить всё содержимое инвентаря черепахи во внешний сундук.
-local function depositAllResults()
-    for s = 1, 16 do
-        if turtle.getItemCount(s) > 0 then
-            dropToExternal(s)
-        end
-    end
 end
 
 --- Очистить инвентарь черепахи (вернуть всё из слотов сетки в EXTRA_SLOTS).
@@ -341,6 +337,12 @@ function worker:craft(recipe, count)
                 end
             end
             if not moved then
+                dropToExternal(1)
+                if turtle.getItemCount(1) == 0 then
+                    moved = true
+                end
+            end
+            if not moved then
                 self.crafting = false
                 return false, "failed to move crafted item from slot 1 to non-grid slots (inventory full)"
             end
@@ -429,7 +431,6 @@ function worker:run()
                     local craftOk, ok, res, elapsed, crafts = pcall(self.craft, self, p.recipe, p.count)
                     self.crafting = false
                     self.current_task_id = nil
-                    pcall(depositAllResults)
                     if not craftOk then
                         -- craft() itself threw an error (crash)
                         local errText = "Worker crash in craft(): " .. tostring(ok)

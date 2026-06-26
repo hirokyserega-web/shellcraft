@@ -146,17 +146,33 @@ function server.run()
             while true do os.sleep(1) end
             return
         end
+        uiInstance.dirty = true
         local timer = os.startTimer(0.5)
         while true do
-            uiInstance:render()
+            if uiInstance.dirty then
+                local renderOk, renderErr = pcall(function() uiInstance:render() end)
+                if not renderOk then
+                    util.err("UI render crashed: " .. tostring(renderErr))
+                end
+                uiInstance.dirty = false
+            end
             local ev, p1, p2, p3 = os.pullEvent()
             if ev == "monitor_touch" then
-                uiInstance:handleTouch(p1, p2, p3)
+                -- monitor_touch: side (p1), x (p2), y (p3)
+                uiInstance:handleTouch(p2, p3)
+                uiInstance.dirty = true
+            elseif ev == "mouse_click" then
+                -- mouse_click: button (p1), x (p2), y (p3)
+                uiInstance:handleTouch(p2, p3)
+                uiInstance.dirty = true
             elseif ev == "key" then
                 uiInstance:handleKey(p1)
+                uiInstance.dirty = true
             elseif ev == "char" then
                 uiInstance:handleChar(p1)
+                uiInstance.dirty = true
             elseif ev == "timer" and p1 == timer then
+                uiInstance.dirty = true
                 timer = os.startTimer(0.5)
             elseif ev == "shellcraft_quit" then
                 util.info("Exiting on user request")

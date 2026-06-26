@@ -174,8 +174,7 @@ function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
     }
 end
 
---- Alias для UI (список рецептов как массив).
-recipes.list = recipes.all
+
 
 --- Обучить рецепт из текущей раскладки черепахи (слоты 1..9).
 -- 1) читает слоты 1..9 (запоминает pattern),
@@ -242,8 +241,12 @@ end
 -- @return true, recipe | false, ошибка
 function recipes:learnFromStorage(invName)
     local p = peripheral.wrap(invName)
-    if not p or type(p.list) ~= "function" or type(p.size) ~= "function" then
-        return false, "invalid storage peripheral"
+    if not p
+       or type(p.list) ~= "function"
+       or type(p.size) ~= "function"
+       or type(p.pushItems) ~= "function"
+       or type(p.pullItems) ~= "function" then
+        return false, "Storage chest is not reachable as an inventory. Connect the storage peripheral to the wired network and enable it."
     end
     
     local size = p.size()
@@ -358,9 +361,20 @@ end
 -- @return true, recipe | false, ошибка
 function recipes:activeLearnMachine(storageName, machineName)
     local pStorage = peripheral.wrap(storageName)
+    if not pStorage
+       or type(pStorage.list) ~= "function"
+       or type(pStorage.size) ~= "function"
+       or type(pStorage.pushItems) ~= "function"
+       or type(pStorage.pullItems) ~= "function" then
+        return false, "Storage chest is not reachable as an inventory."
+    end
     local pMachine = peripheral.wrap(machineName)
-    if not pStorage or not pMachine then
-        return false, "invalid storage or machine peripheral"
+    if not pMachine
+       or type(pMachine.list) ~= "function"
+       or type(pMachine.size) ~= "function"
+       or type(pMachine.pushItems) ~= "function"
+       or type(pMachine.pullItems) ~= "function" then
+        return false, "Machine is not reachable as an inventory."
     end
     
     local storageList = pStorage.list()
@@ -451,8 +465,12 @@ end
 -- @return true, recipe | false, ошибка
 function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
     local pStorage = peripheral.wrap(storageName)
-    if not pStorage or type(pStorage.list) ~= "function" or type(pStorage.size) ~= "function" then
-        return false, "invalid storage peripheral"
+    if not pStorage
+       or type(pStorage.list) ~= "function"
+       or type(pStorage.size) ~= "function"
+       or type(pStorage.pushItems) ~= "function"
+       or type(pStorage.pullItems) ~= "function" then
+        return false, "Storage chest is not reachable as an inventory."
     end
     
     local turtleName = dispatcherObj:workerName(workerId)
@@ -460,8 +478,13 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
         return false, "turtle worker is not attached to the wired modem network"
     end
     local pTurtle = peripheral.wrap(turtleName)
-    if not pTurtle then
-        return false, "cannot wrap turtle peripheral: " .. tostring(turtleName)
+    if not pTurtle
+       or type(pTurtle.list) ~= "function"
+       or type(pTurtle.pushItems) ~= "function"
+       or type(pTurtle.pullItems) ~= "function" then
+       return false, "Turtle #"..tostring(workerId).." is not reachable as an "
+         .."inventory. Connect the turtle to a WIRED modem and ENABLE it "
+         .."(right-click, it must glow red). A wireless modem is not enough."
     end
     
     -- 1. Читаем раскладку из сундука

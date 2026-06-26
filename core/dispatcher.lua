@@ -144,7 +144,16 @@ end
 function dispatcher:prepareIngredients(workerId, task)
     local turtleName = self:workerName(workerId)
     if not turtleName then
-        return false, "воркер " .. tostring(workerId) .. " не найден в сети (нет wired модема?)"
+        return false, "Worker #" .. tostring(workerId) .. " not found on the wired network"
+    end
+    local p = peripheral.wrap(turtleName)
+    if not p
+       or type(p.list) ~= "function"
+       or type(p.pushItems) ~= "function"
+       or type(p.pullItems) ~= "function" then
+        return false, "Turtle #"..tostring(workerId).." is not reachable as an "
+          .."inventory. Connect the turtle to a WIRED modem and ENABLE it "
+          .."(right-click, it must glow red). A wireless modem is not enough."
     end
     -- Очистить инвентарь черепахи от старых предметов (вернуть в хранилище)
     self:collectResult(workerId)
@@ -155,7 +164,7 @@ function dispatcher:prepareIngredients(workerId, task)
         if moved < ing.count then
             -- Не хватило — откат (вернуть всё из черепахи в хранилище)
             self:collectResult(workerId)
-            return false, "Не хватает " .. (ing.count - moved) .. " " .. lang.localize(ing.id)
+            return false, "Missing " .. (ing.count - moved) .. " " .. lang.localize(ing.id)
         end
     end
     return true
@@ -166,8 +175,14 @@ function dispatcher:collectResult(workerId)
     local turtleName = self:workerName(workerId)
     if not turtleName then return 0 end
     local p = peripheral.wrap(turtleName)
-    if not p or not p.list then return 0 end
-    local items = p.list()
+    if not p
+       or type(p.list) ~= "function"
+       or type(p.pushItems) ~= "function"
+       or type(p.pullItems) ~= "function" then
+        return 0
+    end
+    local ok, items = pcall(p.list)
+    if not ok or not items then return 0 end
     local total = 0
     for slot, _ in pairs(items) do
         total = total + self.storage:deposit(turtleName, slot, nil)

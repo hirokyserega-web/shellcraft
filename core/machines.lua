@@ -74,9 +74,10 @@ end
 -- @return { name, type, busy, cooking, input_items, output_items, fuel }
 function machines:info(name)
     local p = wrap(name)
-    if not p or not p.list then return nil end
+    if not p or type(p.list) ~= "function" then return nil end
     local slots, ptype = self:_slots(name)
-    local list = p.list()
+    local ok, list = pcall(p.list)
+    if not ok or not list then return nil end
     local info = {
         name = name,
         type = ptype,
@@ -188,15 +189,17 @@ function machines:_waitResult(name, timeout)
     local slots = self:_slots(name)
     if not slots then return false end
     local p = wrap(name)
-    if not p then return false end
+    if not p or type(p.list) ~= "function" then return false end
     local deadline = os.clock() + timeout
     while os.clock() < deadline do
-        local list = p.list()
-        local hasResult = false
-        for _, s in ipairs(slots.output) do
-            if list[s] ~= nil then hasResult = true; break end
+        local ok, list = pcall(p.list)
+        if ok and list then
+            local hasResult = false
+            for _, s in ipairs(slots.output) do
+                if list[s] ~= nil then hasResult = true; break end
+            end
+            if hasResult then return true end
         end
-        if hasResult then return true end
         os.sleep(0.5)
     end
     return false, "timeout waiting for result"

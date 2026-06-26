@@ -1,31 +1,35 @@
 -- ui/ui.lua
 -- Главный UI ShellCraft: вкладки на мониторе, тач-управление.
--- Табы генерируются динамически (вкладка механизмов появляется при наличии машин).
+-- Вся отрисовка идет через буфер (window API), а хит-тест через self.hits = {}.
+-- Весь текст выводится на английском языке.
 
 local ui = {}
 ui.__index = ui
 
 --- Создать UI.
--- @param monitor объект монитора (term.redirect)
--- @param deps { storage, recipes, dispatcher, machines, lang }
 function ui.new(monitor, deps)
     local self = setmetatable({}, ui)
     self.monitor = monitor
     self.deps = deps
     self.activeTab = "craft"
     self.tabs = {}
-    self.tabBounds = {}
+    self.hits = {}
+    self.dirty = true
     self.configData = config.load()
+    self.settingsLoaded = false
+    
     self.state = {
         craft    = { scroll = 0, selected = 1, mode = "list", qty = "1", active = nil },
-        storage  = { scroll = 0, selected = 1, search = "" },
+        storage  = { scroll = 0, selected = 1, search = "", showKeyboard = false },
         machines = { scroll = 0, selected = 1 },
-        recipes  = { scroll = 0, selected = 1, mode = "list" },
+        recipes  = { scroll = 0, selected = 1, mode = "list", wizardStep = 1, learnType = 1, wizardScroll = 0, wizardSelected = 1 },
         log      = { scroll = 0 },
         settings = { scroll = 0, selected = 1 },
+        tabScrollState = { scroll = 1 },
     }
     self.log = {}
-    self.buttons = {}  -- кнопки текущего экрана для hit-test {rect=, action=}
+    self.toast = nil
+    
     return self
 end
 
@@ -33,21 +37,34 @@ end
 function ui:addLog(msg)
     table.insert(self.log, { time = util.now(), msg = tostring(msg) })
     if #self.log > 200 then table.remove(self.log, 1) end
+    self.dirty = true
 end
 
---- Шаг крафта завершён успешно (вызывается из onEvent сервера).
+--- Шаг крафта завершён успешно.
 function ui:taskDone()
     local a = self.state.craft.active
     if a then a.done = (a.done or 0) + 1 end
+    self.dirty = true
 end
 
 --- Шаг крафта завершён с ошибкой.
 function ui:taskFailed()
     local a = self.state.craft.active
     if a then a.failed = (a.failed or 0) + 1 end
+    self.dirty = true
 end
 
---- Число доступных исполнителей (воркеры + машины) — для оценки параллельности.
+--- Показать всплывающее Toast сообщение.
+function ui:showToast(msg, kind)
+    self.toast = {
+        msg = msg,
+        kind = kind or "info",
+        expires = os.clock() + 3
+    }
+    self.dirty = true
+end
+
+--- Число доступных исполнителей.
 function ui:workersCount()
     local n = 1
     if self.deps.dispatcher then n = math.max(1, self.deps.dispatcher:workerCount()) end
@@ -55,7 +72,7 @@ function ui:workersCount()
     return n
 end
 
---- Сгенерировать список вкладок (динамически).
+--- Сгенерировать список вкладок.
 function ui:buildTabs()
     self.tabs = {
         { id = "craft",   title = "Craft" },
@@ -66,422 +83,395 @@ function ui:buildTabs()
     end
     table.insert(self.tabs, { id = "recipes", title = "Recipes" })
     table.insert(self.tabs, { id = "log",     title = "Log" })
-    table.insert(self.tabs, { id = "settings", title = "Set." })
+    table.insert(self.tabs, { id = "settings", title = "Settings" })
 end
 
---- Переключиться на вкладку (если существует).
+--- Переключиться на вкладку.
 function ui:switchTab(id)
     for _, t in ipairs(self.tabs) do
-        if t.id == id then self.activeTab = id; return true end
+        if t.id == id then
+            self.activeTab = id
+            self.dirty = true
+            return true
+        end
     end
     return false
 end
 
---- Отрисовать полосу вкладок.
-function ui:drawTabs(y)
-    self.tabBounds = {}
-    local w, _ = term.getSize()
-    term.setBackgroundColor(colors.black)
-    term.setCursorPos(1, y)
-    term.write(string.rep(" ", w))
-    local x = 2
-    for _, t in ipairs(self.tabs) do
-        local label = " " .. t.title .. " "
-        local active = (t.id == self.activeTab)
-        local bg = active and colors.lightBlue or colors.gray
-        local fg = active and colors.black or colors.white
-        term.setBackgroundColor(bg)
-        term.setTextColor(fg)
-        term.setCursorPos(x, y)
-        term.write(label)
-        self.tabBounds[#self.tabBounds + 1] = { x = x, y = y, w = #label, id = t.id }
-        x = x + #label + 1
-    end
+--- Зарегистрировать хит-зону.
+function ui:addHit(x, y, w, h, action)
+    if not action then return end
+    table.insert(self.hits, { x = x, y = y, w = w, h = h, action = action })
 end
 
---- Зарегистрировать кнопку для hit-test.
-function ui:button(x, y, w, label, selected, action, opts)
-    local rect = widgets.button(x, y, w, label, selected, opts)
-    table.insert(self.buttons, { rect = rect, action = action })
-    return rect
-end
-
---- Сбросить список кнопок (в начале каждого render).
-function ui:resetButtons()
-    self.buttons = {}
-end
-
---- Главная отрисовка.
+--- Главная функция отрисовки кадра с двойной буферизацией.
 function ui:render()
-    if not self.monitor then return end
-    local old = term.redirect(self.monitor)
-    self:resetButtons()
-    local w, h = term.getSize()
+    local parent = self.monitor or term.current()
+    local w, h = parent.getSize()
+    
+    -- Инициализация / изменение размеров буфера
+    if not self.win or self.winWidth ~= w or self.winHeight ~= h then
+        self.win = window.create(parent, 1, 1, w, h, false)
+        self.winWidth = w
+        self.winHeight = h
+    end
+    
+    -- Перенаправляем вывод в буфер
+    local old = term.redirect(self.win)
+    self.hits = {} -- очищаем хит-цели для нового кадра
+    
+    local minW, minH = 29, 12
+    if w < minW or h < minH then
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.red)
+        term.clear()
+        widgets.center(math.floor(h / 2), "Enlarge monitor: need >= 3x2 blocks", colors.red)
+        widgets.button(self, math.floor((w - 8) / 2) + 1, math.floor(h / 2) + 2, 8, "Exit", { kind = "danger" }, function()
+            os.queueEvent("shellcraft_quit")
+        end)
+    else
+        self:drawFrame(w, h)
+    end
+    
+    -- Выводим буфер разом
+    self.win.setVisible(true)
+    term.redirect(old)
+end
+
+--- Отрисовка элементов интерфейса.
+function ui:drawFrame(w, h)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
-
-    -- Header Bar background (solid gray)
+    
+    -- 1. Шапка (Header)
     term.setBackgroundColor(colors.gray)
     term.setCursorPos(1, 1)
     term.write(string.rep(" ", w))
-
-    -- Title left-aligned
+    
     term.setTextColor(colors.yellow)
     term.setCursorPos(2, 1)
-    term.write(" ShellCraft")
-
-    -- Status right-aligned
+    term.write("ShellCraft")
+    
     local status = ""
     if self.deps.dispatcher then
         local free = self.deps.dispatcher:freeCount()
         local total = 0
         for _ in pairs(self.deps.dispatcher.workers) do total = total + 1 end
         local active = #self.deps.dispatcher:activeTasks()
-        status = string.format("Workers: %d/%d [Act: %d]", total - free, total, active)
+        status = string.format("Workers: %d/%d [Act:%d]", total - free, total, active)
     end
     term.setTextColor(colors.white)
-    term.setCursorPos(math.max(2, w - #status - 4), 1)
+    term.setCursorPos(math.max(12, w - #status - 5), 1)
     term.write(status)
-
-    -- Red exit button on-screen
-    self:button(w - 2, 1, 3, "X", false, function()
+    
+    -- Кнопка выхода [X]
+    widgets.button(self, w - 2, 1, 3, "X", { bg = colors.red, fg = colors.white }, function()
         os.queueEvent("shellcraft_quit")
-    end, { bg = colors.red, fg = colors.white })
-
-    -- Вкладки
+    end)
+    
+    -- 2. Лента вкладок (Tabs)
     self:buildTabs()
-    self:drawTabs(2)
-
-    -- Separator line at Row 3
+    widgets.tabs(self, 2, self.tabs, self.activeTab, self.state.tabScrollState, function(tabId)
+        self:switchTab(tabId)
+    end)
+    
+    -- Разделительная линия
     term.setCursorPos(1, 3)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.gray)
     term.write(string.rep("-", w))
-
-    -- Контент
-    local tab = self.activeTab
-    if tab == "craft" then self:renderCraft(4, h - 1, w)
-    elseif tab == "storage" then self:renderStorage(4, h - 1, w)
-    elseif tab == "machines" then self:renderMachines(4, h - 1, w)
-    elseif tab == "recipes" then self:renderRecipes(4, h - 1, w)
-    elseif tab == "log" then self:renderLog(4, h - 1, w)
-    elseif tab == "settings" then self:renderSettings(4, h - 1, w)
+    
+    -- Перезагрузка конфига при входе в Settings
+    if self.activeTab == "settings" then
+        if not self.settingsLoaded then
+            self.configData = config.load()
+            self.settingsLoaded = true
+        end
+    else
+        self.settingsLoaded = false
     end
-
-    -- Подвал: прогресс активного крафта ИЛИ подсказка
+    
+    -- 3. Отрисовка контента активной вкладки
+    local bodyY = 4
+    local bodyH = h - 4
+    local footerY = h
+    
+    local tab = self.activeTab
+    if tab == "craft" then
+        self:renderCraft(bodyY, bodyY + bodyH, w)
+    elseif tab == "storage" then
+        self:renderStorage(bodyY, bodyY + bodyH, w)
+    elseif tab == "machines" then
+        self:renderMachines(bodyY, bodyY + bodyH, w)
+    elseif tab == "recipes" then
+        self:renderRecipes(bodyY, bodyY + bodyH, w)
+    elseif tab == "log" then
+        self:renderLog(bodyY, bodyY + bodyH, w)
+    elseif tab == "settings" then
+        self:renderSettings(bodyY, bodyY + bodyH, w)
+    end
+    
+    -- 4. Подвал (Footer)
     term.setBackgroundColor(colors.black)
-    term.setCursorPos(1, h)
+    term.setCursorPos(1, footerY)
     term.clearLine()
+    
     local a = self.state.craft.active
     if a and (a.done + a.failed) < a.total then
         local completed = a.done + a.failed
         local pct = a.total > 0 and math.floor(completed / a.total * 100) or 0
-        -- ETA: пока нет завершённых — берём начальную оценку, потом уточняем по факту
         local now = os.epoch("utc")
         local elapsed = (now - (a.started or now)) / 1000
-        local eta
-        if completed > 0 then
-            eta = (elapsed / completed) * (a.total - completed)
-        else
-            eta = a.etaTotal or 0
-        end
-        -- текстовая полоса прогресса
+        local eta = (completed > 0) and ((elapsed / completed) * (a.total - completed)) or (a.etaTotal or 0)
+        
         local etaStr = planner.formatDuration(eta)
         local rightLen = #etaStr + 10
-        local barLen = math.max(8, w - rightLen)
-        local filled = math.floor(barLen * completed / math.max(1, a.total))
-        local bar = string.rep("█", filled) .. string.rep("░", barLen - filled)
-        term.setTextColor(colors.green)
-        term.write(bar)
+        local barLen = math.max(6, w - rightLen)
+        
+        widgets.progress(1, footerY, barLen, completed, a.total)
         term.setTextColor(colors.lightGray)
+        term.setBackgroundColor(colors.black)
         term.write(string.format(" %3d%% ETA %s", pct, etaStr))
     else
         if a and (a.done + a.failed) >= a.total then
             self.state.craft.active = nil
         end
         term.setTextColor(colors.lightGray)
+        term.setBackgroundColor(colors.black)
         term.write(self:footerHint())
     end
-
-    term.redirect(old)
+    
+    -- 5. Toast Overlay (перекрывает подвал)
+    if self.toast and os.clock() < self.toast.expires then
+        local bg = colors.blue
+        local fg = colors.white
+        if self.toast.kind == "ok" or self.toast.kind == "success" then
+            bg = colors.green
+        elseif self.toast.kind == "err" or self.toast.kind == "error" or self.toast.kind == "danger" then
+            bg = colors.red
+        end
+        term.setBackgroundColor(bg)
+        term.setTextColor(fg)
+        term.setCursorPos(1, footerY)
+        term.clearLine()
+        
+        local msg = " " .. self.toast.msg
+        if #msg > w then msg = msg:sub(1, w) end
+        term.write(msg .. string.rep(" ", w - #msg))
+        
+        -- Клик по Toast скрывает его
+        self:addHit(1, footerY, w, 1, function()
+            self.toast = nil
+        end)
+    end
 end
 
---- Подсказка в подвале.
+--- Английские подсказки в подвале.
 function ui:footerHint()
     local tab = self.activeTab
     if tab == "craft" then
-        local m = self.state.craft.mode
-        if m == "list" then return "Tap - select recipe. X - exit." end
-        return "Tap digits/OK. Cancel - back."
-    elseif tab == "storage" then return "Scroll by tapping edges. X - exit."
-    elseif tab == "machines" then return "Tap - refresh status."
-    elseif tab == "recipes" then return "Tap - select. [+Record] - new recipe."
-    elseif tab == "log" then return "Scroll by tapping edges."
-    elseif tab == "settings" then return "Tap chest to set default grid. X - exit."
+        return "Tap recipe to order. X - Exit."
+    elseif tab == "storage" then
+        return "Scroll list. Toggle Keyboard to search."
+    elseif tab == "machines" then
+        return "List of connected machines. Tap Refresh."
+    elseif tab == "recipes" then
+        return "Manage recipes. Tap Record to auto-learn."
+    elseif tab == "log" then
+        return "Scroll through system event log."
+    elseif tab == "settings" then
+        return "Select default crafting grid chest."
     end
     return ""
 end
 
 ----------------------------------------------------------------
--- Вкладка КРАФТ
+-- Вкладка КРАФТ (Craft)
 ----------------------------------------------------------------
 function ui:renderCraft(yTop, yBot, w)
     local st = self.state.craft
     local recipes = self.deps.recipes
     local list = recipes:all()
+    local h = yBot - yTop + 1
+    
     if #list == 0 then
-        widgets.center(math.floor((yTop + yBot) / 2), "No recipes. Go to Recipes tab.", colors.red)
+        widgets.center(math.floor((yTop + yBot) / 2), "No recipes found. Go to Recipes tab.", colors.red)
         return
     end
-    if st.mode == "list" then
-        -- Список рецептов
-        local items = {}
-        for _, r in ipairs(list) do
-            local name = self.deps.lang.display(r.id, r.name)
-            local have = self.deps.storage:count(r.id)
-            local type = r.type == "machine" and " [M]" or ""
-            local tStr = ""
-            if r.avgTime then
-                tStr = string.format(" ~%.0fs", r.avgTime * (r.crafts or 1))
-            end
-            table.insert(items, string.format("%-22s x%-3d%s have:%d%s", name:sub(1, 22), r.output or 1, type, have, tStr))
-        end
-        local h = yBot - yTop + 1
-        widgets.list(1, yTop, w, h, items, st.scroll, st.selected)
-        -- Кнопки прокрутки
-        self:button(w - 4, yTop, 4, " Up ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
-        self:button(w - 4, yBot, 4, " Down ", false, function()
-            if st.scroll + h < #items then st.scroll = st.scroll + (h - 2) end
-        end)
-    elseif st.mode == "quantity" then
+    
+    -- В режиме списка показываем ScrollList
+    local items = {}
+    for _, r in ipairs(list) do
+        local name = self.deps.lang.display(r.id, r.name)
+        local have = self.deps.storage:count(r.id)
+        local typeStr = r.type == "machine" and " [M]" or ""
+        local tStr = r.avgTime and string.format(" ~%.0fs", r.avgTime) or ""
+        table.insert(items, string.format("%s x%d%s (Have:%d)%s", name, r.output or 1, typeStr, have, tStr))
+    end
+    
+    widgets.scrollList(self, 1, yTop, w, h, items, st, function(idx)
+        st.selected = idx
+        st.mode = "quantity"
+        st.qty = "1"
+    end)
+    
+    -- Отрисовка модального диалога заказа крафта
+    if st.mode == "quantity" then
         local r = list[st.selected]
         if not r then st.mode = "list"; return end
-        
-        -- Draw dialog box
-        term.setTextColor(colors.cyan)
-        widgets.box(2, yTop, w - 2, yBot - yTop + 1, "Craft Order", "double")
         
         local name = self.deps.lang.display(r.id, r.name)
         local inStore = self.deps.storage:count(r.id)
         local qty = tonumber(st.qty) or 1
         
-        local showNumpad = (w >= 32)
-        local numpadX = w - 13
-        local leftW = showNumpad and (numpadX - 4) or (w - 6)
+        -- Проверяем, влезает ли Numpad
+        -- Для Numpad требуется 11 символов ширины и 4 строки высоты
+        local showNumpad = (w >= 30 and h >= 10)
         
-        -- Left side info
-        widgets.text(4, yTop + 1, "Item: " .. name:sub(1, leftW), colors.white, colors.black)
-        widgets.text(4, yTop + 2, string.format("Have: %d  Out: %d", inStore, r.output or 1):sub(1, leftW), colors.lightGray, colors.black)
-        widgets.text(4, yTop + 3, ("Qty: " .. st.qty):sub(1, leftW), colors.yellow, colors.black)
-        
-        -- Numpad on the right
-        if showNumpad then
-            local keys_num = {
-                {"1", "2", "3"},
-                {"4", "5", "6"},
-                {"7", "8", "9"},
-                {"<-", "0", "C"}
-            }
-            for rowIdx, rKeys in ipairs(keys_num) do
-                local ry = yTop + rowIdx
-                for colIdx, k in ipairs(rKeys) do
-                    local rx = numpadX + (colIdx - 1) * 4
-                    local btnW = 3
-                    self:button(rx, ry, btnW, k, false, function()
-                        if k == "<-" then
-                            st.qty = st.qty:sub(1, -2)
-                            if st.qty == "" then st.qty = "1" end
-                        elseif k == "C" then
-                            st.qty = "1"
-                        else
-                            if st.qty == "0" or (st.qty == "1" and #st.qty == 1) then
-                                st.qty = k
-                            else
-                                st.qty = st.qty .. k
-                            end
-                        end
-                    end)
-                end
-            end
-        end
-        
-        -- BOM & Timing Details on the left (if detailed layout)
-        if h >= 14 then
+        local bodyFn = function(cx, cy, cw, ch)
+            widgets.text(cx, cy, "Item: " .. widgets.clip(name, cw), colors.white, colors.black)
+            widgets.text(cx, cy + 1, string.format("Have: %d  Output: %d", inStore, r.output or 1), colors.lightGray, colors.black)
+            widgets.text(cx, cy + 2, "Qty: " .. st.qty, colors.yellow, colors.black)
+            
+            -- Вычисляем ETA и BOM
             if qty > 0 then
                 local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage)
                 local bom = planner.calculateBOM(tree)
-                local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
-                widgets.text(4, yTop + 4, ("ETA: " .. planner.formatDuration(estTime, approx)):sub(1, leftW), approx and colors.yellow or colors.green, colors.black)
+                local estTime, approx = planner.estimateTime(tree, self:workersCount(), recipes)
+                widgets.text(cx, cy + 3, "ETA: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green, colors.black)
                 
-                -- Draw BOM list if we have height
-                local y = yTop + 6
-                if h >= 16 then
-                    widgets.text(4, y, "Requires:", colors.cyan, colors.black)
-                    y = y + 1
-                    local itemW = leftW - 10
-                    if itemW >= 4 then
-                        for _, info in ipairs(bom) do
-                            if y < yBot - 3 then
-                                local have = self.deps.storage:count(info.id)
-                                local col = have >= info.count and colors.green or colors.red
-                                widgets.text(4, y, string.format("  %-" .. itemW .. "s %d/%d", 
-                                    self.deps.lang.display(info.id):sub(1, itemW), have, info.count):sub(1, leftW), col, colors.black)
-                                y = y + 1
-                            end
+                -- Вывод BOM требований если есть место по высоте
+                if ch >= 7 then
+                    widgets.text(cx, cy + 4, "Requires:", colors.cyan, colors.black)
+                    local yLine = cy + 5
+                    for _, info in ipairs(bom) do
+                        if yLine <= cy + ch - 1 then
+                            local have = self.deps.storage:count(info.id)
+                            local col = have >= info.count and colors.green or colors.red
+                            widgets.text(cx, yLine, string.format(" %s %d/%d", widgets.clip(self.deps.lang.display(info.id), cw - 10), have, info.count), col, colors.black)
+                            yLine = yLine + 1
                         end
                     end
                 end
             end
-        end
-        
-        -- Incremental Adjustment Buttons
-        local btnY = yTop + 5
-        if not showNumpad then
-            if btnY < yBot - 1 then
-                self:button(4, btnY, 5, "-10", false, function() st.qty = tostring(math.max(1, qty - 10)) end)
-                self:button(10, btnY, 4, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
-                self:button(15, btnY, 4, "+1", false, function() st.qty = tostring(qty + 1) end)
-                self:button(20, btnY, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
-                self:button(4, btnY + 1, 6, "+64", false, function() st.qty = tostring(qty + 64) end)
-                self:button(11, btnY + 1, 6, "Reset", false, function() st.qty = "1" end)
+            
+            -- Рисуем Numpad или Stepper
+            if showNumpad then
+                widgets.numpad(self, cx + cw - 11, cy, function(key)
+                    if key == "<-" then
+                        st.qty = st.qty:sub(1, -2)
+                        if st.qty == "" then st.qty = "1" end
+                    elseif key == "C" then
+                        st.qty = "1"
+                    else
+                        if st.qty == "0" or st.qty == "1" then st.qty = key else st.qty = st.qty .. key end
+                    end
+                end)
+                -- Также добавляем компактный Stepper внизу
+                widgets.stepper(self, cx, cy + 4, cw - 13, qty, function(delta)
+                    st.qty = tostring(math.max(1, qty + delta))
+                end)
             else
-                self:button(4, yTop + 4, 4, "-1", false, function() st.qty = tostring(math.max(1, qty - 1)) end)
-                self:button(9, yTop + 4, 4, "+1", false, function() st.qty = tostring(qty + 1) end)
-            end
-        else
-            if h >= 14 and btnY < yBot - 1 then
-                self:button(4, yBot - 3, 5, "+1", false, function() st.qty = tostring(qty + 1) end)
-                self:button(10, yBot - 3, 5, "+10", false, function() st.qty = tostring(qty + 10) end)
-                self:button(16, yBot - 3, 5, "+64", false, function() st.qty = tostring(qty + 64) end)
+                -- Если Numpad не влезает, используем только Stepper на всю ширину
+                widgets.stepper(self, cx, cy + 4, cw, qty, function(delta)
+                    st.qty = tostring(math.max(1, qty + delta))
+                end)
             end
         end
         
-        -- OK / Cancel (yBot - 1)
-        local okW = math.min(10, math.floor((w - 6) / 2))
-        local okX = 4
-        local cancelX = w - okW - 2
-        
-        self:button(okX, yBot - 1, okW, "OK", true, function()
-            local n = tonumber(st.qty) or 0
-            if n > 0 then
-                local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
-                local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
-                local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
-                if ids then
-                    self:addLog("Order: " .. name .. " x" .. n .. " (" .. #ids .. " steps)")
-                    self.state.craft.active = {
-                        total = #ids, done = 0, failed = 0,
-                        etaTotal = estTime, started = os.epoch("utc"),
-                    }
-                else
-                    self:addLog("Error: " .. tostring(err))
+        local buttons = {
+            {
+                label = "Craft",
+                kind = "active",
+                action = function()
+                    local n = tonumber(st.qty) or 0
+                    if n > 0 then
+                        local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
+                        if ids then
+                            self:showToast(string.format("Queued: %s x%d (%d steps)", widgets.clip(name, 12), n, #ids), "success")
+                            self:addLog("Queued order: " .. name .. " x" .. n)
+                            local tree = planner.buildTree(r.id, n, recipes, self.deps.storage)
+                            local estTime = planner.estimateTime(tree, self:workersCount(), recipes)
+                            self.state.craft.active = {
+                                total = #ids, done = 0, failed = 0,
+                                etaTotal = estTime, started = os.epoch("utc"),
+                            }
+                            st.mode = "list"
+                            st.qty = "1"
+                        else
+                            -- Toast об ошибке, но ДИАЛОГ ОСТАВЛЯЕМ ОТКРЫТЫМ!
+                            self:showToast(tostring(err), "danger")
+                            self:addLog("Order Error: " .. tostring(err))
+                        end
+                    else
+                        st.mode = "list"
+                    end
                 end
-            end
-            st.mode = "list"; st.qty = "1"
-        end, { bgActive = colors.green })
+            },
+            {
+                label = "Cancel",
+                kind = "danger",
+                action = function()
+                    st.mode = "list"
+                    st.qty = "1"
+                end
+            }
+        }
         
-        self:button(cancelX, yBot - 1, okW, "Cancel", false, function()
-            st.mode = "list"; st.qty = "1"
-        end, { bg = colors.red })
+        widgets.dialog(self, "Craft Order", bodyFn, buttons)
     end
 end
 
 ----------------------------------------------------------------
--- Вкладка ХРАНИЛИЩЕ
+-- Вкладка ХРАНИЛИЩЕ (Storage)
 ----------------------------------------------------------------
 function ui:drawKeyboard(x, y)
-    local keys_row1 = {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"}
-    local keys_row2 = {"a", "s", "d", "f", "g", "h", "j", "k", "l", "_"}
-    local keys_row3 = {"z", "x", "c", "v", "b", "n", "m", "-", ".", "<-"}
+    local rows = {
+        {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"},
+        {"a", "s", "d", "f", "g", "h", "j", "k", "l", "_"},
+        {"z", "x", "c", "v", "b", "n", "m", "-", ".", "<-"}
+    }
     
-    local startX = x
-    local btnW = 2
     local st = self.state.storage
-    
-    -- Draw row 1
-    for idx, k in ipairs(keys_row1) do
-        local bx = startX + (idx - 1) * 3
-        self:button(bx, y, btnW, k, false, function()
-            st.search = st.search .. k
-            st.scroll = 0
-            st.selected = 1
-        end)
-    end
-    
-    -- Draw row 2
-    for idx, k in ipairs(keys_row2) do
-        local bx = startX + (idx - 1) * 3
-        local action = function()
-            if k == "_" then
-                st.search = st.search .. " "
-            else
-                st.search = st.search .. k
-            end
-            st.scroll = 0
-            st.selected = 1
+    for rowIdx, keys in ipairs(rows) do
+        local ry = y + rowIdx - 1
+        for colIdx, k in ipairs(keys) do
+            local rx = x + (colIdx - 1) * 3
+            local kw = (k == "<-") and 3 or 2
+            widgets.button(self, rx, ry, kw, k, { kind = "normal" }, function()
+                if k == "<-" then
+                    st.search = st.search:sub(1, -2)
+                else
+                    st.search = st.search .. k
+                end
+                st.scroll = 0
+                st.selected = 1
+            end)
         end
-        local label = (k == "_") and "sp" or k
-        self:button(bx, y + 1, btnW, label, false, action)
     end
-    
-    -- Draw row 3
-    for idx, k in ipairs(keys_row3) do
-        local bx = startX + (idx - 1) * 3
-        local action = function()
-            if k == "<-" then
-                st.search = st.search:sub(1, -2)
-            else
-                st.search = st.search .. k
-            end
-            st.scroll = 0
-            st.selected = 1
-        end
-        self:button(bx, y + 2, btnW, k, false, action)
-    end
-    
-    -- Draw row 4: Clear and Hide
-    self:button(startX, y + 3, 8, " Clear ", false, function()
-        st.search = ""
-        st.scroll = 0
-        st.selected = 1
-    end, { bg = colors.red })
-    
-    self:button(startX + 10, y + 3, 8, " Hide ", false, function()
-        st.showKeyboard = false
-    end, { bg = colors.green })
 end
 
 function ui:renderStorage(yTop, yBot, w)
     local st = self.state.storage
     local items = self.deps.storage:items()
+    local h = yBot - yTop + 1
     
-    -- Keyboard toggle and Clear buttons
-    if w >= 39 then
-        self:button(w - 21, yTop, 8, "Keyboard", st.showKeyboard, function()
-            st.showKeyboard = not st.showKeyboard
-        end)
-        self:button(w - 12, yTop, 8, " Clear ", false, function()
-            st.search = ""
-            st.scroll = 0
-            st.selected = 1
-        end, { bg = colors.red })
-    else
-        self:button(w - 15, yTop, 7, "Keybrd", st.showKeyboard, function()
-            st.showKeyboard = not st.showKeyboard
-        end)
-        self:button(w - 7, yTop, 6, "Clear", false, function()
-            st.search = ""
-            st.scroll = 0
-            st.selected = 1
-        end, { bg = colors.red })
-    end
-
-    -- Draw search bar
-    widgets.text(1, yTop, "Search: " .. st.search .. "_", colors.yellow)
+    -- Кнопки Toggle Keyboard и Clear
+    local keyW = w >= 39 and 10 or 7
+    widgets.button(self, w - keyW * 2 - 2, yTop, keyW, "Keyboard", { selected = st.showKeyboard }, function()
+        st.showKeyboard = not st.showKeyboard
+    end)
+    widgets.button(self, w - keyW - 1, yTop, keyW, "Clear", { kind = "danger" }, function()
+        st.search = ""
+        st.scroll = 0
+        st.selected = 1
+    end)
+    
+    widgets.text(1, yTop, "Search: " .. st.search .. "_", colors.yellow, colors.black)
     local search = st.search:lower()
     
-    -- Filter
+    -- Фильтрация
     local filtered = {}
     for _, it in ipairs(items) do
         local name = self.deps.lang.display(it.id):lower()
@@ -490,40 +480,28 @@ function ui:renderStorage(yTop, yBot, w)
         end
     end
     
-    -- Height calculation (list height is reduced if virtual keyboard is open)
-    local listH = yBot - yTop
+    -- Расчет высоты с учетом клавиатуры
+    local listH = h - 1
     local listBot = yBot
     if st.showKeyboard then
-        listH = yBot - yTop - 4
+        listH = h - 5
         listBot = yBot - 4
     end
     
     local rows = {}
     for _, it in ipairs(filtered) do
         local name = self.deps.lang.display(it.id)
-        table.insert(rows, string.format("%-26s x%d", name:sub(1, 26), it.count))
+        table.insert(rows, string.format("%s x%d", name, it.count))
     end
     
     if #rows == 0 then
         widgets.clearArea(1, yTop + 1, w, listH)
-        widgets.center(math.floor((yTop + listBot) / 2), "Nothing found", colors.gray)
-        -- Still draw keyboard if needed
-        if st.showKeyboard then
-            self:drawKeyboard(math.max(2, math.floor((w - 29) / 2) + 1), yBot - 3)
-        end
-        return
+        widgets.center(math.floor((yTop + listBot) / 2), "No items found", colors.gray)
+    else
+        widgets.scrollList(self, 1, yTop + 1, w, listH, rows, st, function(idx)
+            st.selected = idx
+        end)
     end
-    
-    widgets.list(1, yTop + 1, w, listH, rows, st.scroll, st.selected)
-    
-    self:button(w - 4, yTop + 1, 4, " Up ", false, function()
-        st.scroll = math.max(0, st.scroll - (listH - 2))
-    end)
-    self:button(w - 4, listBot, 4, " Down ", false, function()
-        if st.scroll + listH < #rows then
-            st.scroll = st.scroll + (listH - 2)
-        end
-    end)
     
     if st.showKeyboard then
         self:drawKeyboard(math.max(2, math.floor((w - 29) / 2) + 1), yBot - 3)
@@ -531,78 +509,78 @@ function ui:renderStorage(yTop, yBot, w)
 end
 
 ----------------------------------------------------------------
--- Вкладка МЕХАНИЗМЫ
+-- Вкладка МЕХАНИЗМЫ (Machines)
 ----------------------------------------------------------------
 function ui:renderMachines(yTop, yBot, w)
     local st = self.state.machines
     local mach = self.deps.machines
-    local h = yBot - yTop + 1
+    local h = yBot - yTop
+    
     local rows = {}
     for _, name in ipairs(mach.names) do
         local info = mach:status(name)
-        local busy = info.busy and "BUSY" or "FREE"
+        local statusStr = info.busy and "BUSY" or "FREE"
         local what = info.cooking and (" (" .. self.deps.lang.display(info.cooking) .. ")") or ""
-        table.insert(rows, string.format("%-20s %-6s%s", name:sub(1, 20), busy, what))
+        table.insert(rows, string.format("%s: %s%s", name, statusStr, what))
     end
-    widgets.list(1, yTop, w, h, rows, st.scroll, st.selected)
-    self:button(2, yBot, 14, " Refresh ", false, function()
-        -- пересканируем машины (статус обновится при следующем render)
+    
+    widgets.scrollList(self, 1, yTop, w, h, rows, st, function(idx)
+        st.selected = idx
+    end)
+    
+    widgets.button(self, 1, yBot, 10, "Refresh", { kind = "normal" }, function()
+        if self.deps.storage then self.deps.storage:scan() end
+        if self.deps.machines then self.deps.machines:collectReady() end
+        self:showToast("Refreshed statuses", "info")
     end)
 end
 
 ----------------------------------------------------------------
--- Вкладка РЕЦЕПТЫ
+-- Вкладка РЕЦЕПТЫ (Recipes)
 ----------------------------------------------------------------
---- Быстрая запись рецепта: сундук-сетка → черепашка → крафт → результат → сохранение.
--- Пользователь кладёт ингредиенты в слоты 1-9 сундука-сетки, нажимает кнопку,
--- система автоматически находит свободную черепашку, отправляет предметы,
--- крафтит, забирает результат и сохраняет рецепт.
 function ui:quickRecord()
     local gridChest = self.configData.grid_chest
     if not gridChest then
-        self:addLog("Error: Set grid chest in Settings tab first")
+        self:showToast("Set grid chest in Settings first", "danger")
         return
     end
     
-    -- Проверяем что сундук доступен
     local pGrid = peripheral.wrap(gridChest)
     if not pGrid or type(pGrid.list) ~= "function" then
-        self:addLog("Error: Grid chest not found: " .. gridChest)
+        self:showToast("Grid chest not reachable", "danger")
         return
     end
     
-    -- Проверяем есть ли предметы в слотах 1-9
     local gridList = pGrid.list()
     local hasItems = false
     for slot = 1, math.min(9, pGrid.size()) do
         if gridList[slot] then hasItems = true; break end
     end
     if not hasItems then
-        self:addLog("Error: Place items in slots 1-9 of grid chest")
+        self:showToast("Place items in slots 1-9 of grid chest", "danger")
         return
     end
     
-    -- Ищем первого доступного воркера
     if not self.deps.dispatcher then
-        self:addLog("Error: No dispatcher available")
+        self:showToast("No dispatcher", "danger")
         return
     end
     
     local wList = self.deps.dispatcher:workerList()
     if #wList == 0 then
-        self:addLog("Error: No workers connected")
+        self:showToast("No workers connected", "danger")
         return
     end
     
     local workerId = wList[1].id
-    
-    self:addLog("Auto-crafting via Worker #" .. workerId .. "...")
+    self:showToast("Auto-learning via Worker #" .. workerId .. "...", "info")
     
     local ok, recipe = self.deps.recipes:activeLearnCraft(gridChest, workerId, self.deps.dispatcher)
     if ok then
-        self:addLog("Saved: " .. self.deps.lang.display(recipe.id) .. " x" .. (recipe.output or 1))
+        self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
+        self:addLog("Auto-learned recipe: " .. recipe.id)
     else
-        self:addLog("Error: " .. tostring(recipe))
+        self:showToast(tostring(recipe), "danger")
     end
 end
 
@@ -614,27 +592,8 @@ function ui:startWizard()
     st.wizardScroll = 0
     st.wizardSelected = 1
     
-    -- Предустановка сундука по умолчанию, если он задан в настройках
     if self.configData.grid_chest then
         st.tempStorage = self.configData.grid_chest
-        local list = {}
-        for _, name in ipairs(peripheral.getNames()) do
-            local ok, p = pcall(peripheral.wrap, name)
-            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                local isMach = false
-                if self.deps.machines then
-                    for _, mn in ipairs(self.deps.machines.names) do
-                        if mn == name then isMach = true; break end
-                    end
-                end
-                if not isMach then table.insert(list, name) end
-            end
-        end
-        local idx = 1
-        for i, name in ipairs(list) do
-            if name == st.tempStorage then idx = i; break end
-        end
-        st.wizardSelected = idx
     else
         st.tempStorage = nil
     end
@@ -652,38 +611,17 @@ function ui:wizardNext(wRows)
     if st.wizardStep == 1 then
         st.learnType = st.wizardSelected or 1
         st.wizardStep = 2
-        
-        -- Попытка предвыбора сундука
-        local currentGrid = self.configData.grid_chest
-        local list = {}
-        for _, name in ipairs(peripheral.getNames()) do
-            local ok, p = pcall(peripheral.wrap, name)
-            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                local isMach = false
-                if self.deps.machines then
-                    for _, mn in ipairs(self.deps.machines.names) do
-                        if mn == name then isMach = true; break end
-                    end
-                end
-                if not isMach then table.insert(list, name) end
-            end
-        end
-        local index = 1
-        if currentGrid then
-            for i, name in ipairs(list) do
-                if name == currentGrid then index = i; break end
-            end
-        end
-        st.wizardSelected = index
+        st.wizardSelected = 1
         st.wizardScroll = 0
     elseif st.wizardStep == 2 then
         st.tempStorage = selectedVal
         if st.learnType == 1 then
             local ok, recipe = recipes:learnFromStorage(selectedVal)
             if ok then
-                self:addLog("Saved: " .. self.deps.lang.display(recipe.id))
+                self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
+                self:addLog("Static recipe learned: " .. recipe.id)
             else
-                self:addLog("Error: " .. tostring(recipe))
+                self:showToast(tostring(recipe), "danger")
             end
             st.mode = "list"
         else
@@ -694,25 +632,27 @@ function ui:wizardNext(wRows)
     elseif st.wizardStep == 3 then
         if st.learnType == 2 then
             st.tempMachine = selectedVal
-            self:addLog("Smelting processing...")
+            self:showToast("Machine processing...", "info")
             local ok, recipe = recipes:activeLearnMachine(st.tempStorage, selectedVal)
             if ok then
-                self:addLog("Smelt Saved: " .. self.deps.lang.display(recipe.id))
+                self:showToast("Smelt Saved: " .. self.deps.lang.display(recipe.id), "success")
+                self:addLog("Machine recipe learned: " .. recipe.id)
             else
-                self:addLog("Smelt Error: " .. tostring(recipe))
+                self:showToast(tostring(recipe), "danger")
             end
         elseif st.learnType == 3 then
             local workerId = tonumber(selectedVal:match("#(%d+)"))
             if workerId then
-                self:addLog("Crafting turtle...")
+                self:showToast("Turtle crafting...", "info")
                 local ok, recipe = recipes:activeLearnCraft(st.tempStorage, workerId, self.deps.dispatcher)
                 if ok then
-                    self:addLog("Craft Saved: " .. self.deps.lang.display(recipe.id))
+                    self:showToast("Craft Saved: " .. self.deps.lang.display(recipe.id), "success")
+                    self:addLog("Turtle recipe learned: " .. recipe.id)
                 else
-                    self:addLog("Craft Error: " .. tostring(recipe))
+                    self:showToast(tostring(recipe), "danger")
                 end
             else
-                self:addLog("Invalid worker selected")
+                self:showToast("Invalid worker selected", "danger")
             end
         end
         st.mode = "list"
@@ -729,67 +669,41 @@ function ui:renderRecipes(yTop, yBot, w)
     
     if isSplit then
         local wLeft = math.floor(w * 0.45)
-        if wLeft < 15 then wLeft = 15 end
-        local wRight = w - wLeft - 1
         local startX = wLeft + 2
+        local wRight = w - wLeft - 1
         
-        ------------------------------------------------------------
-        -- LEFT COLUMN: Recipe list
-        ------------------------------------------------------------
+        -- Левая колонка: список рецептов
         local rows = {}
         for _, r in ipairs(list) do
             local name = self.deps.lang.display(r.id, r.name)
-            local type = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
-            table.insert(rows, string.format("[%s] %s", type, name):sub(1, wLeft))
+            local typeStr = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
+            table.insert(rows, string.format("[%s] %s", typeStr, name))
         end
         
-        local listH = h - 1
-        if #rows == 0 then
-            widgets.clearArea(1, yTop, wLeft, listH)
-            local centerY = math.floor((yTop + yBot - 1) / 2)
-            widgets.text(1 + math.floor((wLeft - #("No recipes")) / 2), centerY, "No recipes", colors.gray)
-        else
-            widgets.list(1, yTop, wLeft, listH, rows, st.scroll, st.selected)
-        end
+        widgets.scrollList(self, 1, yTop, wLeft, h - 1, rows, st, function(idx)
+            st.selected = idx
+        end)
         
-        -- Delete & Scroll controls at row yBot of left pane
-        local deleteAction = function()
+        widgets.button(self, 1, yBot, 8, "Delete", { kind = "danger" }, function()
             local r = list[st.selected]
             if r then
                 recipes:remove(r.id)
-                self:addLog("Deleted: " .. self.deps.lang.display(r.id))
-                if st.selected > #recipes:all() then
-                    st.selected = math.max(1, #recipes:all())
-                end
-            end
-        end
-        self:button(1, yBot, 8, "-Delete", false, deleteAction, { bg = colors.red })
-        self:button(wLeft - 6, yBot, 3, "^", false, function()
-            st.scroll = math.max(0, st.scroll - (listH - 2))
-        end)
-        self:button(wLeft - 2, yBot, 3, "v", false, function()
-            if st.scroll + listH < #rows then
-                st.scroll = st.scroll + (listH - 2)
+                self:showToast("Deleted recipe", "success")
+                st.selected = math.max(1, st.selected - 1)
             end
         end)
         
-        ------------------------------------------------------------
-        -- VERTICAL SEPARATOR
-        ------------------------------------------------------------
-        for y = yTop, yBot do
-            term.setCursorPos(wLeft + 1, y)
+        -- Вертикальный разделитель
+        for cy = yTop, yBot do
+            term.setCursorPos(wLeft + 1, cy)
             term.setTextColor(colors.gray)
-            term.setBackgroundColor(colors.black)
             term.write("|")
         end
         
-        ------------------------------------------------------------
-        -- RIGHT COLUMN: Recipe detail / wizard
-        ------------------------------------------------------------
+        -- Правая колонка: Детали / Мастер обучения
         widgets.clearArea(startX, yTop, wRight, h)
         
         if st.mode == "learn_select" then
-            term.setTextColor(colors.cyan)
             local titles = {
                 [1] = "1/3 Mode",
                 [2] = "2/3 Grid Chest",
@@ -797,13 +711,7 @@ function ui:renderRecipes(yTop, yBot, w)
             }
             widgets.text(startX, yTop, titles[st.wizardStep or 1], colors.cyan, colors.black)
             
-            local helpTexts = {
-                [1] = "Select method:",
-                [2] = "Select grid chest:",
-                [3] = (st.learnType == 2) and "Select machine:" or "Select worker:"
-            }
-            widgets.text(startX, yTop + 1, helpTexts[st.wizardStep or 1], colors.lightGray, colors.black)
-            
+            -- Получаем строки для текущего шага мастера
             local wRows = {}
             if st.wizardStep == 1 then
                 wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
@@ -837,283 +745,105 @@ function ui:renderRecipes(yTop, yBot, w)
                 end
             end
             
-            local wListH = h - 3
-            widgets.list(startX, yTop + 2, wRight, wListH, wRows, st.wizardScroll or 0, st.wizardSelected or 1)
+            local wizardState = { scroll = st.wizardScroll, selected = st.wizardSelected }
+            widgets.scrollList(self, startX, yTop + 1, wRight, h - 3, wRows, wizardState, function(idx)
+                st.wizardSelected = idx
+            end)
+            st.wizardScroll = wizardState.scroll
+            st.wizardSelected = wizardState.selected
             
-            if #wRows > wListH then
-                self:button(w - 7, yTop + 2, 3, "^", false, function()
-                    st.wizardScroll = math.max(0, (st.wizardScroll or 0) - 1)
-                end)
-                self:button(w - 7, yBot - 1, 3, "v", false, function()
-                    if (st.wizardScroll or 0) + wListH < #wRows then
-                        st.wizardScroll = (st.wizardScroll or 0) + 1
-                    end
-                end)
-            end
+            -- Кнопки мастера
+            local btnW = 5
+            widgets.button(self, startX, yBot, btnW, "Back", { kind = "normal" }, function()
+                st.wizardStep = math.max(1, st.wizardStep - 1)
+                st.wizardSelected = 1
+                st.wizardScroll = 0
+            end)
+            widgets.button(self, startX + btnW + 1, yBot, btnW, "Cancel", { kind = "danger" }, function()
+                st.mode = "list"
+            end)
             
-            local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
-            local btnLabel = isLastStep and "Record" or "Next"
-            
-            if st.wizardStep > 1 then
-                local btnX = startX + math.floor((wRight - 18) / 2)
-                self:button(btnX, yBot, 4, "Back", false, function()
-                    st.wizardStep = st.wizardStep - 1
-                    st.wizardSelected = 1
-                    st.wizardScroll = 0
-                end, { bg = colors.gray })
-                self:button(btnX + 5, yBot, 6, "Cancel", false, function()
-                    st.mode = "list"
-                end, { bg = colors.red })
-                self:button(btnX + 12, yBot, 6, btnLabel, true, function()
-                    self:wizardNext(wRows)
-                end, { bgActive = colors.green })
-            else
-                local btnX = startX + math.floor((wRight - 18) / 2)
-                self:button(btnX, yBot, 8, "Cancel", false, function()
-                    st.mode = "list"
-                end, { bg = colors.red })
-                self:button(btnX + 10, yBot, 8, "Next", true, function()
-                    self:wizardNext(wRows)
-                end, { bgActive = colors.green })
-            end
-            
+            local btnLabel = (st.wizardStep == 3 or (st.wizardStep == 2 and st.learnType == 1)) and "Record" or "Next"
+            widgets.button(self, startX + (btnW + 1) * 2, yBot, btnW, btnLabel, { kind = "active" }, function()
+                self:wizardNext(wRows)
+            end)
         else
+            -- Режим просмотра рецепта
             local r = list[st.selected]
             if r then
-                widgets.text(startX, yTop, "Name: " .. self.deps.lang.display(r.id):sub(1, wRight - 6), colors.yellow, colors.black)
-                local tName = r.type == "shaped" and "Shaped" or (r.type == "shapeless" and "Shapeless" or "Machine")
-                widgets.text(startX, yTop + 1, string.format("Type: %s  x%d", tName, r.output or 1), colors.lightGray, colors.black)
-                
-                if r.type == "shaped" then
-                    local unique = {}
-                    local letters = {"A", "B", "C", "D", "E", "F", "G", "H", "I"}
-                    local mapping = {}
-                    for row = 1, 3 do
-                        local rPattern = r.pattern and r.pattern[row]
-                        if rPattern then
-                            for col = 1, 3 do
-                                local cell = rPattern[col]
-                                local cellId = cell and cell.id
-                                if cellId then
-                                    if not mapping[cellId] then
-                                        local letter = letters[#unique + 1] or "?"
-                                        mapping[cellId] = letter
-                                        table.insert(unique, { id = cellId, letter = letter })
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    for row = 1, 3 do
-                        local rPattern = r.pattern and r.pattern[row]
-                        local line = ""
-                        for col = 1, 3 do
-                            local cell = rPattern and rPattern[col]
-                            local cellId = cell and cell.id
-                            if cellId then
-                                line = line .. "[" .. mapping[cellId] .. "]"
-                            else
-                                line = line .. "[ ]"
-                            end
-                        end
-                        widgets.text(startX, yTop + 1 + row, line, colors.cyan, colors.black)
-                    end
-                    local curY = yTop + 5
-                    for idx, itemInfo in ipairs(unique) do
-                        if curY < yBot then
-                            local disp = self.deps.lang.display(itemInfo.id):sub(1, wRight - 3)
-                            widgets.text(startX, curY, itemInfo.letter .. ":" .. disp, colors.white, colors.black)
-                            curY = curY + 1
-                        end
-                    end
-                elseif r.type == "machine" then
-                    widgets.text(startX, yTop + 3, "Machine: " .. tostring(r.machine):sub(1, wRight), colors.cyan, colors.black)
-                    if r.input and r.input[1] then
-                        local inp = r.input[1]
-                        widgets.text(startX, yTop + 4, "Input: " .. self.deps.lang.display(inp.id):sub(1, wRight), colors.white, colors.black)
-                        widgets.text(startX, yTop + 5, "Count: " .. (inp.count or 1), colors.white, colors.black)
-                    end
-                elseif r.type == "shapeless" then
-                    widgets.text(startX, yTop + 3, "Ingredients:", colors.cyan, colors.black)
-                    local curY = yTop + 4
-                    if r.ingredients then
-                        for _, ing in ipairs(r.ingredients) do
-                            if curY < yBot then
-                                local name = self.deps.lang.display(ing.id or ing)
-                                widgets.text(startX, curY, string.format(" - %dx %s", ing.count or 1, name):sub(1, wRight), colors.white, colors.black)
-                                curY = curY + 1
-                            end
-                        end
-                    end
+                widgets.text(startX, yTop, "Recipe: " .. widgets.clip(r.id, wRight - 8), colors.white, colors.black)
+                widgets.text(startX, yTop + 1, "Type: " .. r.type, colors.lightGray, colors.black)
+                widgets.text(startX, yTop + 2, "Output: " .. (r.output or 1), colors.lightGray, colors.black)
+                if r.avgTime then
+                    widgets.text(startX, yTop + 3, "Avg Time: " .. string.format("%.1fs", r.avgTime), colors.lightGray, colors.black)
                 end
                 
-                local totalW = 22
-                local btnX = startX + math.floor((wRight - totalW) / 2)
-                self:button(btnX, yBot, 10, "Record", false, function()
-                    self:quickRecord()
-                end, { bgActive = colors.green })
-                self:button(btnX + 12, yBot, 10, "Advanced", false, function()
-                    self:startWizard()
-                end)
-            else
-                local centerY = math.floor((yTop + yBot) / 2)
-                local helpMsg = "Put items in grid chest"
-                widgets.text(startX + math.floor((wRight - #helpMsg) / 2), centerY - 1, helpMsg, colors.gray)
-                local helpMsg2 = "slots 1-9, then Record"
-                widgets.text(startX + math.floor((wRight - #helpMsg2) / 2), centerY + 1, helpMsg2, colors.gray)
-                
-                local totalW = 22
-                local btnX = startX + math.floor((wRight - totalW) / 2)
-                self:button(btnX, yBot, 10, "Record", false, function()
-                    self:quickRecord()
-                end, { bgActive = colors.green })
-                self:button(btnX + 12, yBot, 10, "Advanced", false, function()
-                    self:startWizard()
-                end)
+                -- Ингредиенты
+                widgets.text(startX, yTop + 5, "Ingredients:", colors.cyan, colors.black)
+                local ings = recipes.ingredientsOf(r)
+                local yLine = yTop + 6
+                for _, ing in ipairs(ings) do
+                    if yLine <= yBot - 2 then
+                        widgets.text(startX, yLine, string.format(" - %s x%d", widgets.clip(self.deps.lang.display(ing.id), wRight - 8), ing.count), colors.lightGray, colors.black)
+                        yLine = yLine + 1
+                    end
+                end
             end
+            
+            -- Кнопки действий
+            widgets.button(self, startX, yBot, 8, "Record", { kind = "active" }, function()
+                self:quickRecord()
+            end)
+            widgets.button(self, startX + 9, yBot, 6, "Wizard", { kind = "normal" }, function()
+                self:startWizard()
+            end)
         end
-        
     else
-        -- FALLBACK SINGLE-PANE LAYOUT (w < 34)
-        if st.mode == "learn_select" then
-            term.setTextColor(colors.cyan)
-            local titles = {
-                [1] = "1/3 Choose Mode",
-                [2] = "2/3 Choose Grid Chest",
-                [3] = (st.learnType == 2) and "3/3 Choose Machine" or "3/3 Choose Worker"
-            }
-            widgets.box(2, yTop, w - 2, yBot - yTop + 1, titles[st.wizardStep or 1], "double")
-            
-            local helpTexts = {
-                [1] = "Select recording method:",
-                [2] = "Select chest used as grid:",
-                [3] = (st.learnType == 2) and "Select furnace machine:" or "Select worker turtle:"
-            }
-            widgets.text(3, yTop + 1, helpTexts[st.wizardStep or 1], colors.lightGray, colors.black)
-            
-            local wRows = {}
-            if st.wizardStep == 1 then
-                wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
-            elseif st.wizardStep == 2 then
-                for _, name in ipairs(peripheral.getNames()) do
-                    local ok, p = pcall(peripheral.wrap, name)
-                    if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                        local isMach = false
-                        if self.deps.machines then
-                            for _, mn in ipairs(self.deps.machines.names) do
-                                if mn == name then isMach = true; break end
-                            end
-                        end
-                        if not isMach then table.insert(wRows, name) end
-                    end
-                end
-            elseif st.wizardStep == 3 then
-                if st.learnType == 2 then
-                    if self.deps.machines then
-                        for _, name in ipairs(self.deps.machines.names) do
-                            table.insert(wRows, name)
-                        end
-                    end
-                elseif st.learnType == 3 then
-                    if self.deps.dispatcher then
-                        local wList = self.deps.dispatcher:workerList()
-                        for _, workerInfo in ipairs(wList) do
-                            table.insert(wRows, "Worker #" .. workerInfo.id)
-                        end
-                    end
-                end
-            end
-            
-            local listH = yBot - yTop + 1 - 4
-            widgets.list(3, yTop + 2, w - 4, listH, wRows, st.wizardScroll or 0, st.wizardSelected or 1)
-            
-            if #wRows > listH then
-                self:button(w - 7, yTop + 2, 4, "Up", false, function()
-                    st.wizardScroll = math.max(0, (st.wizardScroll or 0) - 1)
-                end)
-                self:button(w - 7, yBot - 2, 4, "Dn", false, function()
-                    if (st.wizardScroll or 0) + listH < #wRows then
-                        st.wizardScroll = (st.wizardScroll or 0) + 1
-                    end
-                end)
-            end
-            
-            local btnW = 8
-            local startX = math.floor((w - (btnW * 3 + 2)) / 2) + 1
-            
-            local isLastStep = (st.wizardStep == 3) or (st.wizardStep == 2 and st.learnType == 1)
-            local btnLabel = isLastStep and "Record" or "Next"
-            
-            if st.wizardStep > 1 then
-                self:button(startX, yBot - 1, btnW, "Back", false, function()
-                    st.wizardStep = st.wizardStep - 1
-                    st.wizardSelected = 1
-                    st.wizardScroll = 0
-                end, { bg = colors.gray })
-                self:button(startX + btnW + 1, yBot - 1, btnW, "Cancel", false, function()
-                    st.mode = "list"
-                end, { bg = colors.red })
-                self:button(startX + (btnW + 1) * 2, yBot - 1, btnW, btnLabel, true, function()
-                    self:wizardNext(wRows)
-                end, { bgActive = colors.green })
-            else
-                self:button(startX + btnW + 1, yBot - 1, btnW, "Cancel", false, function()
-                    st.mode = "list"
-                end, { bg = colors.red })
-                self:button(startX + (btnW + 1) * 2, yBot - 1, btnW, "Next", true, function()
-                    self:wizardNext(wRows)
-                end, { bgActive = colors.green })
-            end
-            return
-        end
-        
+        -- Упрощенный режим (если ширина слишком маленькая для колонок)
         local rows = {}
         for _, r in ipairs(list) do
             local name = self.deps.lang.display(r.id, r.name)
-            local type = r.type == "machine" and "M" or (r.type == "shaped" and "S" or "L")
-            table.insert(rows, string.format("[%s] %-24s x%d", type, name:sub(1, 24), r.output or 1))
-        end
-        if #rows == 0 then
-            widgets.center(yTop + 1, "No recipes", colors.gray)
-        else
-            widgets.list(1, yTop, w, h - 2, rows, st.scroll, st.selected)
+            table.insert(rows, name)
         end
         
-        self:button(2, yBot - 1, 10, "Record", false, function()
+        widgets.scrollList(self, 1, yTop, w, h - 1, rows, st, function(idx)
+            st.selected = idx
+        end)
+        
+        widgets.button(self, 1, yBot, 6, "Record", { kind = "active" }, function()
             self:quickRecord()
-        end, { bgActive = colors.green })
-        self:button(13, yBot - 1, 6, "More", false, function()
+        end)
+        widgets.button(self, 8, yBot, 6, "Wizard", { kind = "normal" }, function()
             self:startWizard()
         end)
-        self:button(20, yBot - 1, 14, " - Delete ", false, function()
-            if list[st.selected] then
-                recipes:remove(list[st.selected].id)
-                self:addLog("Deleted recipe: " .. self.deps.lang.display(list[st.selected].id))
+        widgets.button(self, 15, yBot, 6, "Delete", { kind = "danger" }, function()
+            local r = list[st.selected]
+            if r then
+                recipes:remove(r.id)
+                self:showToast("Deleted recipe", "success")
+                st.selected = math.max(1, st.selected - 1)
             end
-        end, { bg = colors.red })
+        end)
     end
 end
 
 ----------------------------------------------------------------
--- Вкладка ЛОГ
+-- Вкладка ЛОГ (Log)
 ----------------------------------------------------------------
 function ui:renderLog(yTop, yBot, w)
     local st = self.state.log
     local h = yBot - yTop + 1
     local rows = {}
-    -- последние снизу
     for i = #self.log, 1, -1 do
         table.insert(rows, self.log[i].time .. " " .. self.log[i].msg)
     end
+    
     if #rows == 0 then
         widgets.center(math.floor((yTop + yBot) / 2), "Log is empty", colors.gray)
         return
     end
-    widgets.list(1, yTop, w, h, rows, st.scroll, nil)
-    self:button(w - 4, yTop, 4, " Up ", false, function() st.scroll = math.max(0, st.scroll - (h - 2)) end)
-    self:button(w - 4, yBot, 4, " Down ", false, function()
-        if st.scroll + h < #rows then st.scroll = st.scroll + (h - 2) end
-    end)
+    
+    widgets.scrollList(self, 1, yTop, w, h, rows, st, function(idx) end)
 end
 
 ----------------------------------------------------------------
@@ -1121,15 +851,13 @@ end
 ----------------------------------------------------------------
 function ui:renderSettings(yTop, yBot, w)
     local st = self.state.settings
-    local h = yBot - yTop + 1
+    local h = yBot - yTop
     
-    -- Получаем список всех инвентарей
     local rows = {}
     local inventories = {}
     for _, name in ipairs(peripheral.getNames()) do
         local ok, p = pcall(peripheral.wrap, name)
         if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-            -- Исключаем машины из списка
             local isMach = false
             if self.deps.machines then
                 for _, mn in ipairs(self.deps.machines.names) do
@@ -1142,7 +870,6 @@ function ui:renderSettings(yTop, yBot, w)
         end
     end
     
-    -- Строим строки для списка с пометкой текущего выбранного
     local currentGrid = self.configData.grid_chest
     for _, name in ipairs(inventories) do
         local label = name
@@ -1154,24 +881,18 @@ function ui:renderSettings(yTop, yBot, w)
         table.insert(rows, label)
     end
     
-    term.setTextColor(colors.cyan)
-    widgets.text(2, yTop, "Choose Crafting Grid Chest:", colors.cyan, colors.black)
+    widgets.text(1, yTop, "Choose Crafting Grid Chest:", colors.cyan, colors.black)
     
-    local listH = h - 2
     if #rows == 0 then
         widgets.center(math.floor((yTop + yBot) / 2), "No chests found", colors.gray)
     else
-        -- Рисуем список
-        widgets.list(1, yTop + 1, w, listH, rows, st.scroll, st.selected)
-        
-        -- Кнопки прокрутки
-        self:button(w - 4, yTop + 1, 4, " Up ", false, function()
-            st.scroll = math.max(0, st.scroll - (listH - 2))
-        end)
-        self:button(w - 4, yBot, 4, " Down ", false, function()
-            if st.scroll + listH < #rows then
-                st.scroll = st.scroll + (listH - 2)
-            end
+        widgets.scrollList(self, 1, yTop + 1, w, h, rows, st, function(idx)
+            st.selected = idx
+            local selectedChest = inventories[idx]
+            self.configData.grid_chest = selectedChest
+            config.save(self.configData)
+            self:addLog("Default grid chest: " .. selectedChest)
+            self:showToast("Saved default grid chest", "success")
         end)
     end
 end
@@ -1179,260 +900,107 @@ end
 ----------------------------------------------------------------
 -- Обработка событий
 ----------------------------------------------------------------
---- Обработать тач по монитору.
-function ui:handleTouch(side, x, y)
-    -- Тап по вкладкам (строка 2)
-    if y == 2 then
-        for _, b in ipairs(self.tabBounds) do
-            if widgets.hit(b, x, y) then
-                self:switchTab(b.id)
-                return
+--- Обработать тач по экрану.
+function ui:handleTouch(x, y)
+    -- Ищем цели с КОНЦА списка (верхние слои перекрывают нижние)
+    for i = #self.hits, 1, -1 do
+        local h = self.hits[i]
+        if x >= h.x and x < h.x + h.w and y >= h.y and y < h.y + h.h then
+            local ok, err = pcall(h.action)
+            if not ok then
+                self:showToast("Error: " .. tostring(err), "danger")
+                self:addLog("Action error: " .. tostring(err))
             end
-        end
-        return
-    end
-    -- Тап по кнопкам текущего экрана
-    for _, b in ipairs(self.buttons) do
-        if widgets.hit(b.rect, x, y) then
-            if b.action then b.action() end
-            return
+            self.dirty = true
+            return true
         end
     end
-    -- Тап по списку (выбор элемента)
-    self:handleListTouch(x, y)
+    return false
 end
 
---- Обработать тап внутри списка (выбор элемента).
-function ui:handleListTouch(x, y)
-    local w, _ = self.monitor.getSize()
-    local tab = self.activeTab
-    local st = self.state[tab]
-    if not st then return end
-    
-    if tab == "recipes" then
-        local isSplit = (w >= 34)
-        local wLeft = isSplit and math.floor(w * 0.45) or w
-        if isSplit and wLeft < 15 then wLeft = 15 end
-        
-        if isSplit then
-            if x <= wLeft then
-                local yTopList = 4
-                local idx = y - yTopList + 1 + (st.scroll or 0)
-                local list = self.deps.recipes:all()
-                if list[idx] then st.selected = idx end
-            elseif st.mode == "learn_select" and x >= wLeft + 2 and x <= w - 5 then
-                local yTopList = 6
-                local idx = y - yTopList + 1 + (st.wizardScroll or 0)
-                local wRows = {}
-                if st.wizardStep == 1 then
-                    wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
-                elseif st.wizardStep == 2 then
-                    for _, name in ipairs(peripheral.getNames()) do
-                        local ok, p = pcall(peripheral.wrap, name)
-                        if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                            local isMach = false
-                            if self.deps.machines then
-                                for _, mn in ipairs(self.deps.machines.names) do
-                                    if mn == name then isMach = true; break end
-                                end
-                            end
-                            if not isMach then table.insert(wRows, name) end
-                        end
-                    end
-                elseif st.wizardStep == 3 then
-                    if st.learnType == 2 then
-                        if self.deps.machines then
-                            for _, name in ipairs(self.deps.machines.names) do
-                                table.insert(wRows, name)
-                            end
-                        end
-                    elseif st.learnType == 3 then
-                        if self.deps.dispatcher then
-                            local wList = self.deps.dispatcher:workerList()
-                            for _, workerInfo in ipairs(wList) do
-                                table.insert(wRows, "Worker #" .. workerInfo.id)
-                            end
-                        end
-                    end
-                end
-                if wRows[idx] then
-                    st.wizardSelected = idx
-                end
-            end
-        else
-            if st.mode == "learn_select" then
-                if x > w - 5 then return end
-                local yListTop = 6
-                local idx = y - yListTop + 1 + (st.wizardScroll or 0)
-                local wRows = {}
-                if st.wizardStep == 1 then
-                    wRows = { "Read Chest (Static)", "Active Smelt (Machine)", "Active Craft (Turtle)" }
-                elseif st.wizardStep == 2 then
-                    for _, name in ipairs(peripheral.getNames()) do
-                        local ok, p = pcall(peripheral.wrap, name)
-                        if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                            local isMach = false
-                            if self.deps.machines then
-                                for _, mn in ipairs(self.deps.machines.names) do
-                                    if mn == name then isMach = true; break end
-                                end
-                            end
-                            if not isMach then table.insert(wRows, name) end
-                        end
-                    end
-                elseif st.wizardStep == 3 then
-                    if st.learnType == 2 then
-                        if self.deps.machines then
-                            for _, name in ipairs(self.deps.machines.names) do
-                                table.insert(wRows, name)
-                            end
-                        end
-                    elseif st.learnType == 3 then
-                        if self.deps.dispatcher then
-                            local wList = self.deps.dispatcher:workerList()
-                            for _, workerInfo in ipairs(wList) do
-                                table.insert(wRows, "Worker #" .. workerInfo.id)
-                            end
-                        end
-                    end
-                end
-                if wRows[idx] then
-                    st.wizardSelected = idx
-                end
-            else
-                if x > w - 5 then return end
-                local idx = y - 4 + 1 + (st.scroll or 0)
-                local list = self.deps.recipes:all()
-                if list[idx] then st.selected = idx end
-            end
-        end
-        return
-    end
-    
-    if x > w - 5 then return end
-    if not st.selected then return end
-    local yTop = 4
-    local idx = y - yTop + 1 + (st.scroll or 0)
-    local list
-    if tab == "craft" and self.state.craft.mode == "list" then
-        list = self.deps.recipes:all()
-        if list[idx] then
-            st.selected = idx
-            self.state.craft.mode = "quantity"
-            self.state.craft.qty = "1"
-        end
-    elseif tab == "storage" then
-        list = self.deps.storage:items()
-        if list[idx] then st.selected = idx end
-    elseif tab == "machines" then
-        list = self.deps.machines.names
-        if list[idx] then st.selected = idx end
-    elseif tab == "settings" then
-        local inventories = {}
-        for _, name in ipairs(peripheral.getNames()) do
-            local ok, p = pcall(peripheral.wrap, name)
-            if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                local isMach = false
-                if self.deps.machines then
-                    for _, mn in ipairs(self.deps.machines.names) do
-                        if mn == name then isMach = true; break end
-                    end
-                end
-                if not isMach then table.insert(inventories, name) end
-            end
-        end
-        local yTopList = 5
-        local idx = y - yTopList + 1 + (st.scroll or 0)
-        if inventories[idx] then
-            st.selected = idx
-            local selectedChest = inventories[idx]
-            self.configData.grid_chest = selectedChest
-            config.save(self.configData)
-            self:addLog("Default grid: " .. selectedChest)
-        end
-    end
-end
-
---- Обработать ввод символа (на компьютере с клавиатурой).
--- Используется для ввода количества в режиме заказа и поиска в хранилище.
+--- Обработать ввод символа с клавиатуры.
 function ui:handleChar(ch)
     local tab = self.activeTab
     if tab == "craft" and self.state.craft.mode == "quantity" then
         local st = self.state.craft
         if ch:match("%d") then
-            -- цифра: дописать к количеству (если текущее "0" — заменить)
-            if st.qty == "0" then st.qty = ch else st.qty = st.qty .. ch end
-        elseif ch == "\b" or ch == "\8" then
-            -- backspace
-            st.qty = st.qty:sub(1, -2)
-            if st.qty == "" then st.qty = "0" end
+            if st.qty == "0" or st.qty == "1" then
+                st.qty = ch
+            else
+                st.qty = st.qty .. ch
+            end
+            self.dirty = true
         end
     elseif tab == "storage" then
         local st = self.state.storage
-        if ch == "\b" or ch == "\8" then
-            st.search = st.search:sub(1, -2)
-        elseif ch:match("%S") then
+        if ch:match("%S") or ch == " " then
             st.search = st.search .. ch
+            st.scroll = 0
+            st.selected = 1
+            self.dirty = true
         end
-        st.scroll = 0
-        st.selected = 1
     end
 end
 
---- Обработать событие клавиатуры (на компьютере).
+--- Обработать нажатие специальной клавиши.
 function ui:handleKey(key)
+    local tab = self.activeTab
     if key == keys.q then
         os.queueEvent("shellcraft_quit")
+        self.dirty = true
+    elseif key == keys.backspace then
+        if tab == "craft" and self.state.craft.mode == "quantity" then
+            local st = self.state.craft
+            st.qty = st.qty:sub(1, -2)
+            if st.qty == "" then st.qty = "1" end
+            self.dirty = true
+        elseif tab == "storage" then
+            local st = self.state.storage
+            st.search = st.search:sub(1, -2)
+            st.scroll = 0
+            st.selected = 1
+            self.dirty = true
+        end
     elseif key == keys.up then
         self:moveSelection(-1)
+        self.dirty = true
     elseif key == keys.down then
         self:moveSelection(1)
+        self.dirty = true
     elseif key == keys.left then
         self:moveTab(-1)
+        self.dirty = true
     elseif key == keys.right then
         self:moveTab(1)
+        self.dirty = true
     end
 end
 
 function ui:moveSelection(delta)
-    local st = self.state[self.activeTab]
-    if not st then return end
-    if self.activeTab == "recipes" and st.mode == "learn_select" then
-        local rowsCount = 0
-        if st.wizardStep == 1 then
-            rowsCount = 3
-        elseif st.wizardStep == 2 then
-            for _, name in ipairs(peripheral.getNames()) do
-                local ok, p = pcall(peripheral.wrap, name)
-                if ok and p and type(p.list) == "function" and type(p.size) == "function" then
-                    local isMach = false
-                    if self.deps.machines then
-                        for _, mn in ipairs(self.deps.machines.names) do
-                            if mn == name then isMach = true; break end
-                        end
-                    end
-                    if not isMach then rowsCount = rowsCount + 1 end
-                end
-            end
-        elseif st.wizardStep == 3 then
-            if st.learnType == 2 then
-                rowsCount = self.deps.machines and self.deps.machines:count() or 0
-            elseif st.learnType == 3 then
-                if self.deps.dispatcher then
-                    local wList = self.deps.dispatcher:workerList()
-                    rowsCount = #wList
-                end
+    local tab = self.activeTab
+    local st = self.state[tab]
+    if not st or not st.selected then return end
+    
+    local listSize = 0
+    if tab == "craft" then
+        listSize = #self.deps.recipes:all()
+    elseif tab == "storage" then
+        -- Фильтруем как в render
+        local items = self.deps.storage:items()
+        local search = st.search:lower()
+        local count = 0
+        for _, it in ipairs(items) do
+            local name = self.deps.lang.display(it.id):lower()
+            if search == "" or name:find(search, 1, true) or it.id:lower():find(search, 1, true) then
+                count = count + 1
             end
         end
-        st.wizardSelected = util.clamp((st.wizardSelected or 1) + delta, 1, math.max(1, rowsCount))
-        return
-    end
-    if not st.selected then return end
-    local list
-    if self.activeTab == "craft" then list = self.deps.recipes:all()
-    elseif self.activeTab == "storage" then list = self.deps.storage:items()
-    elseif self.activeTab == "recipes" then list = self.deps.recipes:all()
-    elseif self.activeTab == "settings" then
+        listSize = count
+    elseif tab == "machines" then
+        listSize = #self.deps.machines.names
+    elseif tab == "recipes" then
+        listSize = #self.deps.recipes:all()
+    elseif tab == "settings" then
         local count = 0
         for _, name in ipairs(peripheral.getNames()) do
             local ok, p = pcall(peripheral.wrap, name)
@@ -1446,10 +1014,12 @@ function ui:moveSelection(delta)
                 if not isMach then count = count + 1 end
             end
         end
-        st.selected = util.clamp(st.selected + delta, 1, math.max(1, count))
-        return
-    else return end
-    st.selected = util.clamp(st.selected + delta, 1, math.max(1, #list))
+        listSize = count
+    end
+    
+    if listSize > 0 then
+        st.selected = util.clamp(st.selected + delta, 1, listSize)
+    end
 end
 
 function ui:moveTab(delta)

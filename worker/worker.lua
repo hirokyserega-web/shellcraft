@@ -80,6 +80,15 @@ local function dropToExternal(slot)
     return false
 end
 
+--- Сбросить всё содержимое инвентаря черепахи во внешний сундук.
+local function depositAllResults()
+    for s = 1, 16 do
+        if turtle.getItemCount(s) > 0 then
+            dropToExternal(s)
+        end
+    end
+end
+
 --- Очистить инвентарь черепахи (вернуть всё из слотов сетки в EXTRA_SLOTS).
 local function clearCraftingGrid()
     for _, s in ipairs(GRID) do
@@ -420,6 +429,7 @@ function worker:run()
                     local craftOk, ok, res, elapsed, crafts = pcall(self.craft, self, p.recipe, p.count)
                     self.crafting = false
                     self.current_task_id = nil
+                    pcall(depositAllResults)
                     if not craftOk then
                         -- craft() itself threw an error (crash)
                         local errText = "Worker crash in craft(): " .. tostring(ok)

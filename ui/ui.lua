@@ -720,7 +720,7 @@ function ui:assignDankDialog(periphName, currentFluid, currentTarget)
                 st.mode = "list"
             end
         }
-    end
+    }
     
     widgets.dialog(self, "Assign Dank", bodyFn, buttons)
 end

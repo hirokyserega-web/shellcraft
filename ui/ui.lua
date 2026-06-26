@@ -300,25 +300,94 @@ function ui:renderCraft(yTop, yBot, w)
         return
     end
     
-    -- В режиме списка показываем ScrollList
-    local items = {}
+    -- 1. Сбор категорий по префиксу ID (modID)
+    local categories = { "All" }
+    local catSet = {}
     for _, r in ipairs(list) do
-        local name = self.deps.lang.display(r.id, r.name)
-        local have = self.deps.storage:count(r.id)
-        local typeStr = r.type == "machine" and " [M]" or ""
-        local tStr = r.avgTime and string.format(" ~%.0fs", r.avgTime) or ""
-        table.insert(items, string.format("%s x%d%s (Have:%d)%s", name, r.output or 1, typeStr, have, tStr))
+        local mod = r.id:match("^([^:]+):") or "minecraft"
+        if not catSet[mod] then
+            catSet[mod] = true
+            table.insert(categories, mod)
+        end
+    end
+    table.sort(categories, function(a, b)
+        if a == "All" then return true end
+        if b == "All" then return false end
+        return a < b
+    end)
+    
+    local catIdx = st.categoryIdx or 1
+    if catIdx > #categories then catIdx = 1 end
+    st.categoryIdx = catIdx
+    local currentCat = categories[catIdx]
+    
+    -- Отрисовка строки категорий
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.white)
+    term.setCursorPos(1, yTop)
+    term.clearLine()
+    
+    term.setCursorPos(2, yTop)
+    term.write("<")
+    self:addHit(1, yTop, 3, 1, function()
+        st.categoryIdx = st.categoryIdx - 1
+        if st.categoryIdx < 1 then st.categoryIdx = #categories end
+        st.selected = 1
+        st.scroll = 0
+        self.dirty = true
+    end)
+    
+    term.setCursorPos(w - 1, yTop)
+    term.write(">")
+    self:addHit(w - 2, yTop, 3, 1, function()
+        st.categoryIdx = st.categoryIdx + 1
+        if st.categoryIdx > #categories then st.categoryIdx = 1 end
+        st.selected = 1
+        st.scroll = 0
+        self.dirty = true
+    end)
+    
+    local catLabel = "[" .. currentCat .. "]"
+    local labelX = math.floor((w - #catLabel) / 2) + 1
+    if labelX < 4 then labelX = 4 end
+    term.setCursorPos(labelX, yTop)
+    term.write(widgets.clip(catLabel, w - 8))
+    
+    -- 2. Фильтрация списка рецептов
+    local filteredList = {}
+    for _, r in ipairs(list) do
+        local mod = r.id:match("^([^:]+):") or "minecraft"
+        if currentCat == "All" or mod == currentCat then
+            table.insert(filteredList, r)
+        end
     end
     
-    widgets.scrollList(self, 1, yTop, w, h, items, st, function(idx)
-        st.selected = idx
-        st.mode = "quantity"
-        st.qty = "1"
-    end)
+    local listY = yTop + 1
+    local listH = h - 1
+    
+    if #filteredList == 0 then
+        widgets.center(math.floor((listY + yBot) / 2), "No recipes in this category", colors.red)
+    else
+        -- В режиме списка показываем ScrollList
+        local items = {}
+        for _, r in ipairs(filteredList) do
+            local name = self.deps.lang.display(r.id, r.name)
+            local have = self.deps.storage:count(r.id)
+            local typeStr = r.type == "machine" and " [M]" or ""
+            local tStr = r.avgTime and string.format(" ~%.0fs", r.avgTime) or ""
+            table.insert(items, string.format("%s x%d%s (Have:%d)%s", name, r.output or 1, typeStr, have, tStr))
+        end
+        
+        widgets.scrollList(self, 1, listY, w, listH, items, st, function(idx)
+            st.selected = idx
+            st.mode = "quantity"
+            st.qty = "1"
+        end)
+    end
     
     -- Отрисовка модального диалога заказа крафта
     if st.mode == "quantity" then
-        local r = list[st.selected]
+        local r = filteredList[st.selected]
         if not r then st.mode = "list"; return end
         
         local name = self.deps.lang.display(r.id, r.name)

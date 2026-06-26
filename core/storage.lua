@@ -99,13 +99,21 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
             local toMove = math.min(remaining, loc.qty)
             local ok, n = false, 0
             if p.pushItems then
-                ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, targetSlot)
+                if targetSlot then
+                    ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, targetSlot)
+                else
+                    ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove)
+                end
             end
             if not ok or not n or n == 0 then
                 -- Fallback: pull from target peripheral
                 local target = wrap(targetPeripheral)
                 if target and target.pullItems then
-                    ok, n = pcall(target.pullItems, loc.p, loc.s, toMove, targetSlot)
+                    if targetSlot then
+                        ok, n = pcall(target.pullItems, loc.p, loc.s, toMove, targetSlot)
+                    else
+                        ok, n = pcall(target.pullItems, loc.p, loc.s, toMove)
+                    end
                 end
             end
             if ok and n and n > 0 then

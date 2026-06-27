@@ -182,6 +182,12 @@ function config.resolve(cfg)
         importSet[cfg.default_import] = true
     end
     
+    -- Исключаемые сундуки (чтобы система не забирала из них предметы как из обычного склада)
+    local excludeSet = {}
+    for name in pairs(importSet) do excludeSet[name] = true end
+    if cfg.grid_chest then excludeSet[cfg.grid_chest] = true end
+    if cfg.recipe_input_chest then excludeSet[cfg.recipe_input_chest] = true end
+    
     -- 3. Разрешаем остальные категории
     for k in pairs(result) do
         if k ~= "machines" then
@@ -189,7 +195,7 @@ function config.resolve(cfg)
             if manual and #manual > 0 then
                 for _, name in ipairs(manual) do
                     if peripheral.isPresent(name) then
-                        local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name] or importSet[name]))
+                        local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
                         if not isExcluded then
                             table.insert(result[k], name)
                         end
@@ -197,7 +203,7 @@ function config.resolve(cfg)
                 end
             else
                 for _, name in ipairs(auto[k] or {}) do
-                    local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name] or importSet[name]))
+                    local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
                     if not isExcluded then
                         table.insert(result[k], name)
                     end

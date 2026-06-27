@@ -584,7 +584,9 @@ function dispatcher:batchCrafts(recipe)
     local inPer = recipes.itemsPerCraft(recipe)
     local byOut = math.floor(MAX_OUT_ITEMS / math.max(1, out))
     local byIn  = inPer > 0 and math.floor(MAX_IN_ITEMS / inPer) or byOut
-    return math.max(1, math.min(byOut, byIn))   -- макс. крафтов в одной задаче
+    local byChunk = math.floor(SLOT / math.max(1, out))
+    if byChunk < 1 then byChunk = 1 end
+    return math.max(1, math.min(byOut, byIn, byChunk))   -- макс. крафтов в одной задаче
 end
 
 --- Запрос крафта: строит план, ставит шаги в очередь.

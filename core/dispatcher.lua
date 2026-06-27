@@ -556,6 +556,18 @@ function dispatcher:allTasks()
     return arr
 end
 
+local SLOT = 64
+local MAX_OUT_ITEMS = 8 * SLOT   -- не больше 8 слотов под выход
+local MAX_IN_ITEMS  = 4 * SLOT   -- не больше 4 слотов под вход
+
+function dispatcher:batchCrafts(recipe)
+    local out = recipe.output or 1
+    local inPer = recipes.itemsPerCraft(recipe)
+    local byOut = math.floor(MAX_OUT_ITEMS / math.max(1, out))
+    local byIn  = inPer > 0 and math.floor(MAX_IN_ITEMS / inPer) or byOut
+    return math.max(1, math.min(byOut, byIn))   -- макс. крафтов в одной задаче
+end
+
 --- Запрос крафта: строит план, ставит шаги в очередь.
 -- @param id ID предмета
 -- @param count сколько
@@ -583,37 +595,55 @@ function dispatcher:requestCraft(id, count, recipes)
     end
 
     local taskIds = {}
-    local nodeToTaskId = {}
+    local nodeToTaskIds = {}
 
     local function createTasks(node)
         if not node or not node.has_recipe then return nil end
-        if nodeToTaskId[node] then return nodeToTaskId[node] end
+        if nodeToTaskIds[node] then return nodeToTaskIds[node] end
 
         local deps = {}
         for _, child in ipairs(node.children) do
-            local depId = createTasks(child)
-            if depId then
-                table.insert(deps, depId)
+            local depIds = createTasks(child)
+            if depIds then
+                for _, depId in ipairs(depIds) do
+                    table.insert(deps, depId)
+                end
             end
         end
 
-        local tid = newTaskId()
-        local task = {
-            id = tid,
-            recipe = node.recipe,
-            count = node.count,
-            status = "queued",
-            attempts = 0,
-            progress = 0,
-            result = nil,
-            dependencies = deps,
-        }
-        self.tasks[tid] = task
-        nodeToTaskId[node] = tid
-        table.insert(taskIds, tid)
-        table.insert(self.queue, tid)
-        emit(self, "task_queued", { id = tid, recipe = node.recipe.id, count = node.count })
-        return tid
+        local batchItems = node.count
+        if node.recipe.type == "shaped" or node.recipe.type == "shapeless" then
+            local out = node.recipe.output or 1
+            local batch = self:batchCrafts(node.recipe)
+            batchItems = batch * out
+        end
+
+        local tids = {}
+        local remaining = node.count
+        while remaining > 0 do
+            local countPart = math.min(remaining, batchItems)
+            remaining = remaining - countPart
+
+            local tid = newTaskId()
+            local task = {
+                id = tid,
+                recipe = node.recipe,
+                count = countPart,
+                status = "queued",
+                attempts = 0,
+                progress = 0,
+                result = nil,
+                dependencies = deps,
+            }
+            self.tasks[tid] = task
+            table.insert(tids, tid)
+            table.insert(taskIds, tid)
+            table.insert(self.queue, tid)
+            emit(self, "task_queued", { id = tid, recipe = node.recipe.id, count = countPart })
+        end
+
+        nodeToTaskIds[node] = tids
+        return tids
     end
 
     createTasks(tree)

@@ -177,6 +177,46 @@ function recipes.craftsNeeded(recipe, want)
     end
 end
 
+--- Вычислить суммарное количество предметов входа на ОДИН крафт.
+function recipes.itemsPerCraft(recipe)
+    local inPer = 0
+    if not recipe then return 0 end
+    if recipe.type == "shapeless" and recipe.ingredients then
+        for _, ing in ipairs(recipe.ingredients) do
+            local icount = 1
+            if type(ing) == "table" then
+                icount = ing.count or 1
+            end
+            inPer = inPer + icount
+        end
+    elseif recipe.type == "shaped" and recipe.pattern then
+        for r = 1, 3 do
+            local row = recipe.pattern[r]
+            if row then
+                for c = 1, 3 do
+                    local cell = row[c]
+                    if cell then
+                        inPer = inPer + 1
+                    end
+                end
+            end
+        end
+    elseif (recipe.type == "station" or recipe.type == "machine") and recipe.itemInput then
+        for _, ing in ipairs(recipe.itemInput) do
+            inPer = inPer + (ing.count or 1)
+        end
+    elseif recipe.type == "machine" and recipe.input then
+        for _, ing in ipairs(recipe.input) do
+            local icount = 1
+            if type(ing) == "table" then
+                icount = ing.count or 1
+            end
+            inPer = inPer + icount
+        end
+    end
+    return inPer
+end
+
 --- Полная потребность в ингредиентах для want штук результата.
 -- Возвращает массив { {id, count} }.
 function recipes.ingredientsFor(recipe, wantCount)

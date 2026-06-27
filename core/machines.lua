@@ -479,13 +479,46 @@ function machines:tick()
     for jobId, job in pairs(self.jobs) do
         local cycles = getCycles(job.recipe, job.count)
         
+        -- Initialize job metrics
+        job.total_cycles = job.total_cycles or cycles
+        job.cycles_done = job.cycles_done or 0
+        job.total_moved = job.total_moved or 0
+        
+        -- Calculate maxCycles chunk size based on recipe inputs and outputs
+        local maxCycles = 64
+        local recipe = job.recipe
+        if recipe.itemInput then
+            for _, ing in ipairs(recipe.itemInput) do
+                local limit = math.floor(64 / math.max(1, ing.count or 1))
+                maxCycles = math.min(maxCycles, limit)
+            end
+        elseif recipe.input then
+            for _, ing in ipairs(recipe.input) do
+                local icount = type(ing) == "table" and ing.count or 1
+                local limit = math.floor(64 / math.max(1, icount))
+                maxCycles = math.min(maxCycles, limit)
+            end
+        end
+        if recipe.itemOutput then
+            for _, out in ipairs(recipe.itemOutput) do
+                local limit = math.floor(64 / math.max(1, out.count or 1))
+                maxCycles = math.min(maxCycles, limit)
+            end
+        elseif recipe.output then
+            local limit = math.floor(64 / math.max(1, recipe.output))
+            maxCycles = math.min(maxCycles, limit)
+        end
+        maxCycles = math.max(1, maxCycles)
+        
         if job.state == "feeding" then
-            local ok, err = self:feed(job.name, job.recipe, cycles)
+            local chunk = math.min(maxCycles, job.total_cycles - job.cycles_done)
+            job.current_chunk = chunk
+            local ok, err = self:feed(job.name, job.recipe, chunk)
             if ok then
                 job.state = "processing"
                 job.started_at = os.clock()
                 local avgTime = job.recipe.avgTime or 10
-                job.deadline = os.clock() + math.max(30, cycles * avgTime * 3)
+                job.deadline = os.clock() + math.max(30, chunk * avgTime * 3)
             else
                 job.state = "error"
                 emit(self, "machine_error", { name = job.name, error = err })
@@ -494,7 +527,7 @@ function machines:tick()
             end
             
         elseif job.state == "processing" then
-            local isReady, err = self:ready(job.name, job.recipe, cycles)
+            local isReady, err = self:ready(job.name, job.recipe, job.current_chunk)
             if err then
                 job.state = "error"
                 emit(self, "machine_error", { name = job.name, error = err })
@@ -515,10 +548,17 @@ function machines:tick()
             local elapsed = os.clock() - job.started_at
             if elapsed < 0 then elapsed = 0 end
             
-            job.state = "done"
-            emit(self, "machine_done", { name = job.name, recipe = job.recipe.id, count = moved })
-            if job.onDone then job.onDone(true, moved, elapsed, cycles) end
-            self.jobs[jobId] = nil
+            job.total_moved = job.total_moved + moved
+            job.cycles_done = job.cycles_done + job.current_chunk
+            
+            if job.cycles_done < job.total_cycles then
+                job.state = "feeding"
+            else
+                job.state = "done"
+                emit(self, "machine_done", { name = job.name, recipe = job.recipe.id, count = job.total_moved })
+                if job.onDone then job.onDone(true, job.total_moved, elapsed, job.total_cycles) end
+                self.jobs[jobId] = nil
+            end
         end
     end
 end

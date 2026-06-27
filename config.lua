@@ -22,6 +22,8 @@ config.defaults = {
     grid_chest = nil,          -- default storage grid chest for recording recipes
     grid_dank = nil,           -- default dank (fluid tank)
     github_token = nil,        -- GitHub PAT token for private repos or rate limit bypass
+    import_chests = {},        -- list of import chests
+    default_import = nil,      -- default import chest
     -- Ручное переопределение периферии (пусто = автоопределение)
     peripherals = {
         storage   = {},        -- список имён chest/barrel
@@ -169,14 +171,25 @@ function config.resolve(cfg)
         end
     end
     
-    -- 2. Разрешаем остальные категории
+    -- 2. Сбор импортных сундуков
+    local importSet = {}
+    if cfg.import_chests then
+        for _, name in ipairs(cfg.import_chests) do
+            importSet[name] = true
+        end
+    end
+    if cfg.default_import then
+        importSet[cfg.default_import] = true
+    end
+    
+    -- 3. Разрешаем остальные категории
     for k in pairs(result) do
         if k ~= "machines" then
             local manual = cfg.peripherals and cfg.peripherals[k]
             if manual and #manual > 0 then
                 for _, name in ipairs(manual) do
                     if peripheral.isPresent(name) then
-                        local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name]))
+                        local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name] or importSet[name]))
                         if not isExcluded then
                             table.insert(result[k], name)
                         end
@@ -184,7 +197,7 @@ function config.resolve(cfg)
                 end
             else
                 for _, name in ipairs(auto[k] or {}) do
-                    local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name]))
+                    local isExcluded = (k == "storage" and (cfg.grid_chest == name or machinesSet[name] or importSet[name]))
                     if not isExcluded then
                         table.insert(result[k], name)
                     end

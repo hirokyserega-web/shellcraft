@@ -289,6 +289,30 @@ function worker:craft(recipe, count)
     local remainingCrafts = crafts
     local stepNum = 1
     while remainingCrafts > 0 do
+        local occupied = 0
+        for _, s in ipairs(EXTRA_SLOTS) do
+            if turtle.getItemCount(s) > 0 then
+                occupied = occupied + 1
+            end
+        end
+        if occupied >= 6 then
+            for _, s in ipairs(EXTRA_SLOTS) do
+                if turtle.getItemCount(s) > 0 then
+                    dropToExternal(s)
+                end
+            end
+            occupied = 0
+            for _, s in ipairs(EXTRA_SLOTS) do
+                if turtle.getItemCount(s) > 0 then
+                    occupied = occupied + 1
+                end
+            end
+            if occupied >= 6 then
+                self.crafting = false
+                return false, "turtle inventory full, reduce batch size"
+            end
+        end
+
         local maxChunk = math.floor(64 / (recipe.output or 1))
         if maxChunk < 1 then maxChunk = 1 end
         local chunk = math.min(maxChunk, remainingCrafts)

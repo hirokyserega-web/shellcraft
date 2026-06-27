@@ -302,6 +302,60 @@ function storage:depositAll(sourcePeripheral, sourceSlot)
     return self:deposit(sourcePeripheral, sourceSlot, nil)
 end
 
+--- Импортировать предметы из импортного сундука в хранилище.
+-- @param chestName имя сундука (опц., если пусто — автовыбор из конфига)
+-- @param slotLimit лимит обрабатываемых заполненных слотов (опц.)
+-- @return перемещено предметов, nil | 0, ошибка
+function storage:importFrom(chestName, slotLimit)
+    local cfg = config.load()
+    local targetChest = chestName
+    if not targetChest or targetChest == "" then
+        targetChest = cfg.default_import
+        if not targetChest or targetChest == "" then
+            if cfg.import_chests and #cfg.import_chests > 0 then
+                for _, name in ipairs(cfg.import_chests) do
+                    if peripheral.isPresent(name) then
+                        targetChest = name
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if not targetChest or not peripheral.isPresent(targetChest) then
+        return 0, "No import chest configured or present"
+    end
+
+    local p = wrap(targetChest)
+    if not p or not p.size or not p.list then
+        return 0, "Chest " .. tostring(targetChest) .. " is not reachable or not a container"
+    end
+
+    local list = p.list()
+    local size = p.size()
+    local totalMoved = 0
+    local slotsProcessed = 0
+
+    for slot = 1, size do
+        if list[slot] then
+            local count = list[slot].count or 0
+            if count > 0 then
+                if slotLimit and slotsProcessed >= slotLimit then
+                    break
+                end
+                local n = self:deposit(targetChest, slot, nil)
+                if n > 0 then
+                    totalMoved = totalMoved + n
+                    slotsProcessed = slotsProcessed + 1
+                end
+            end
+        end
+    end
+
+    return totalMoved, nil
+end
+
 --- Получить displayName предмета из getItemDetail (fallback для локализации).
 function storage:displayName(id)
     for _, name in ipairs(self.names) do

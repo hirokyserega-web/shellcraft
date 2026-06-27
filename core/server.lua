@@ -191,6 +191,7 @@ function server.run()
 
     local function storageScanLoop()
         local lastSaveTime = os.clock()
+        local lastImportTime = os.clock()
         while true do
             local ok, err = pcall(function()
                 st:scan()
@@ -209,6 +210,11 @@ function server.run()
                     st:collectNames(names)
                     names.saveCache()
                     lastSaveTime = now
+                end
+                -- Авто-импорт каждые 5 секунд
+                if (now - lastImportTime) >= 5 then
+                    st:importFrom(nil, 8)
+                    lastImportTime = now
                 end
             end)
             if not ok then

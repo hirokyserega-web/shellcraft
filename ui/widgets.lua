@@ -354,4 +354,64 @@ function widgets.progress(x, y, w, value, max)
     end
 end
 
+--- Сегментированный переключатель.
+function widgets.segmented(ui, y, items, activeId, onSelect)
+    local scrW, _ = term.getSize()
+    local currentX = 2
+    local currentY = y
+    
+    term.setCursorPos(1, currentY)
+    term.setTextColor(colors.gray)
+    term.setBackgroundColor(colors.black)
+    term.write("[")
+    
+    for idx, item in ipairs(items) do
+        local label = " " .. item.title .. " "
+        local active = (item.id == activeId)
+        
+        local requiredW = #label + 1
+        if currentX + requiredW > scrW then
+            term.setCursorPos(currentX, currentY)
+            term.setTextColor(colors.gray)
+            term.setBackgroundColor(colors.black)
+            term.write("]")
+            
+            currentY = currentY + 1
+            currentX = 2
+            
+            term.setCursorPos(1, currentY)
+            term.setTextColor(colors.gray)
+            term.setBackgroundColor(colors.black)
+            term.write("[")
+        end
+        
+        local bg = active and colors.lightBlue or colors.black
+        local fg = active and colors.black or colors.white
+        
+        term.setBackgroundColor(bg)
+        term.setTextColor(fg)
+        term.setCursorPos(currentX, currentY)
+        term.write(label)
+        
+        if ui and onSelect then
+            ui:addHit(currentX, currentY, #label, 1, function()
+                onSelect(item.id)
+            end)
+        end
+        
+        currentX = currentX + #label
+        
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.gray)
+        term.setCursorPos(currentX, currentY)
+        if idx < #items then
+            term.write("|")
+            currentX = currentX + 1
+        else
+            term.write("]")
+        end
+    end
+    return currentY
+end
+
 return widgets

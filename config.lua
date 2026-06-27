@@ -47,8 +47,16 @@ function config.load()
 end
 
 --- Сохранить конфиг.
+-- ВАЖНО: не сохраняем cfg.peripherals — там авто-обнаруженные значения,
+-- которые не должны становиться «ручными» переопределениями при следующей загрузке.
 function config.save(cfg)
-    util.saveData("config.dat", cfg)
+    local toSave = {}
+    for k, v in pairs(cfg) do
+        if k ~= "peripherals" then
+            toSave[k] = v
+        end
+    end
+    util.saveData("config.dat", toSave)
 end
 
 --- Проверить, является ли периферия инвентарём (chest/barrel/сундук).

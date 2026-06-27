@@ -460,32 +460,61 @@ function ui:renderCraft(yTop, yBot, w)
             -- Вычисляем ETA и BOM
             if qty > 0 then
                 local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage, self.deps.fluids)
-                local bom = planner.calculateBOM(tree)
                 local estTime, approx = planner.estimateTime(tree, self:workersCount(), recipes)
                 widgets.text(cx, cy + 3, "ETA: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green, colors.black)
-                
-                -- Вывод BOM требований если есть место по высоте
-                if ch >= 7 then
+
+                -- BOM: показываем только то, что реально нужно дополнительно добыть/скрафтить
+                -- Используем planner.bom() — он возвращает базовые ресурсы (листья без рецепта)
+                local rawBom = planner.bom(tree)
+                -- Строим отсортированный список: сначала нехватает, потом всё остальное
+                local bomList = {}
+                for id, need in pairs(rawBom.items) do
+                    -- Скрываем сам крафтуемый предмет из BOM (он не является ингредиентом)
+                    if id ~= r.id then
+                        table.insert(bomList, { id = id, need = need })
+                    end
+                end
+                table.sort(bomList, function(a, b)
+                    local ha = self.deps.storage:count(a.id)
+                    local hb = self.deps.storage:count(b.id)
+                    local misA = ha < a.need
+                    local misB = hb < b.need
+                    if misA ~= misB then return misA end  -- нехватка — вверх
+                    return a.id < b.id
+                end)
+
+                -- Оставляем место для Stepper (cy+4) и кнопок (cy+ch-1)
+                local bomYStart = cy + 5
+                local bomYMax   = cy + ch - 2  -- -2 чтобы не налезать на Stepper
+
+                if ch >= 7 and #bomList > 0 then
                     widgets.text(cx, cy + 4, "Requires:", colors.cyan, colors.black)
-                    local yLine = cy + 5
-                    -- Items
-                    for _, info in ipairs(bom.items) do
-                        if yLine <= cy + ch - 1 then
-                            local have = self.deps.storage:count(info.id)
-                            local col = have >= info.count and colors.green or colors.red
-                            widgets.text(cx, yLine, string.format(" %s %d/%d", widgets.clip(self.deps.lang.display(info.id), cw - 10), have, info.count), col, colors.black)
-                            yLine = yLine + 1
-                        end
+                    local yLine = bomYStart
+                    for _, info in ipairs(bomList) do
+                        if yLine > bomYMax then break end
+                        local have = self.deps.storage:count(info.id)
+                        local col = have >= info.need and colors.green or colors.red
+                        widgets.text(cx, yLine,
+                            string.format(" %s %d/%d",
+                                widgets.clip(self.deps.lang.display(info.id), cw - 10),
+                                have, info.need),
+                            col, colors.black)
+                        yLine = yLine + 1
                     end
-                    -- Fluids
-                    for _, info in ipairs(bom.fluids) do
-                        if yLine <= cy + ch - 1 then
-                            local have = self.deps.fluids:count(info.fluid)
-                            local col = have >= info.mb and colors.green or colors.red
-                            widgets.text(cx, yLine, string.format(" %s %d/%d mB", widgets.clip(util.formatId(info.fluid), cw - 14), have, info.mb), col, colors.black)
-                            yLine = yLine + 1
-                        end
+                    -- Жидкости
+                    for _, info in ipairs(rawBom.fluids or {}) do
+                        if yLine > bomYMax then break end
+                        local have = self.deps.fluids:count(info.fluid)
+                        local col = have >= info.mb and colors.green or colors.red
+                        widgets.text(cx, yLine,
+                            string.format(" %s %d/%d mB",
+                                widgets.clip(util.formatId(info.fluid), cw - 14),
+                                have, info.mb),
+                            col, colors.black)
+                        yLine = yLine + 1
                     end
+                elseif ch >= 6 and #bomList == 0 then
+                    widgets.text(cx, cy + 4, "All resources available", colors.green, colors.black)
                 end
             end
             
@@ -858,19 +887,23 @@ function ui:renderStorage(yTop, yBot, w)
         st.selected = 1
     end)
     widgets.button(self, w - w3 - 1, controlY, w3, importLabel, { kind = "active" }, function()
-        local count, err = self.deps.storage:importFrom(nil, nil)
+        local chest = self.configData and self.configData.default_import
+        if not chest or chest == "" then
+            self:showToast("Set Import Chest in Settings first", "danger")
+            return
+        end
+        local count, err = self.deps.storage:importFrom(chest, nil)
         if count and count > 0 then
             self:showToast(string.format("Imported %d items", count), "success")
-        elseif err then
-            if err == "No import chest configured" then
-                self:showToast("Set Import Chest in Settings first", "danger")
-            else
-                self:showToast(tostring(err), "danger")
-            end
+        elseif err == "storage_full" then
+            self:showToast("Storage is full!", "warning")
+        elseif err and err ~= "partial" then
+            self:showToast(tostring(err), "danger")
         else
             self:showToast("No items to import", "warning")
         end
     end)
+
     
     widgets.text(1, controlY, "Search: " .. st.search .. "_", colors.yellow, colors.black)
     local search = st.search:lower()

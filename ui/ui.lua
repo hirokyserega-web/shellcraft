@@ -571,13 +571,70 @@ function ui:renderQueue(yTop, yBot, w)
         return
     end
     
-    local list = disp:activeTasks()
-    table.sort(list, function(a, b) return a.id < b.id end)
-    
-    if #list == 0 then
+    local rawList = disp:activeTasks()
+    if #rawList == 0 then
         widgets.center(math.floor((yTop + yBot) / 2), "No active tasks", colors.gray)
         return
     end
+
+    -- Group tasks by recipe ID to keep UI clean and prevent overflow
+    local grouped = {}
+    local list = {}
+    for _, t in ipairs(rawList) do
+        local key = t.recipe.id
+        if not grouped[key] then
+            grouped[key] = {
+                recipe = t.recipe,
+                count = 0,
+                status = "queued",
+                attempts = 0,
+                progress = 0,
+                worker_ids = {},
+                ids = {},
+                is_group = true
+            }
+            table.insert(list, grouped[key])
+        end
+        local g = grouped[key]
+        g.count = g.count + t.count
+        table.insert(g.ids, t.id)
+        g.attempts = math.max(g.attempts, t.attempts or 0)
+        
+        if t.status == "running" then
+            g.status = "running"
+            if t.worker_id then
+                g.worker_ids[t.worker_id] = true
+            end
+            g.progress = g.progress + (t.progress or 0)
+        elseif t.status == "paused" and g.status ~= "running" then
+            g.status = "paused"
+        end
+    end
+
+    -- Finalize progress and workers for each grouped task
+    for _, g in ipairs(list) do
+        local wList = {}
+        for wId in pairs(g.worker_ids) do
+            table.insert(wList, tostring(wId))
+        end
+        table.sort(wList)
+        g.worker_str = #wList > 0 and table.concat(wList, ", ") or nil
+
+        local runningCount = 0
+        for _, t in ipairs(rawList) do
+            if t.recipe.id == g.recipe.id and t.status == "running" then
+                runningCount = runningCount + 1
+            end
+        end
+        if runningCount > 0 then
+            g.progress = math.floor(g.progress / runningCount)
+        else
+            g.progress = nil
+        end
+        g.id = g.ids[1] -- fallback for selection/compatibility
+    end
+
+    table.sort(list, function(a, b) return a.recipe.id < b.recipe.id end)
     
     local isSplit = (w >= 34)
     local startXLeft = 1
@@ -643,12 +700,16 @@ function ui:renderQueue(yTop, yBot, w)
         if t then
             local name = self.deps.lang.display(t.recipe.id, t.recipe.name)
             widgets.text(startX, yTop, "Task: " .. widgets.clip(name, wRight - 6), colors.cyan, colors.black)
-            widgets.text(startX, yTop + 1, "ID: " .. t.id, colors.lightGray, colors.black)
+            if t.is_group and #t.ids > 1 then
+                widgets.text(startX, yTop + 1, "Subtasks: " .. #t.ids, colors.lightGray, colors.black)
+            else
+                widgets.text(startX, yTop + 1, "ID: " .. t.id, colors.lightGray, colors.black)
+            end
             widgets.text(startX, yTop + 2, "Count: " .. t.count, colors.white, colors.black)
             
             local statusStr = t.status
             if t.status == "running" then
-                statusStr = "Running on #" .. tostring(t.worker_id)
+                statusStr = "Running on #" .. (t.worker_str or tostring(t.worker_id or "?"))
             elseif t.status == "queued" then
                 statusStr = "Queued"
             elseif t.status == "paused" then
@@ -669,14 +730,23 @@ function ui:renderQueue(yTop, yBot, w)
                 widgets.text(startX, yTop + 5, "Progress: " .. t.progress .. "%", colors.green, colors.black)
             end
             
-            -- Cancel button at the bottom of the right column
+            -- Cancel button at the bottom of the right column (cancels all subtasks in group)
             widgets.button(self, startX, yBot, wRight, "Cancel Task", { kind = "danger" }, function()
-                local ok, err = disp:cancelTask(t.id)
-                if ok then
+                local anyOk = false
+                local lastErr = nil
+                for _, tid in ipairs(t.ids) do
+                    local ok, err = disp:cancelTask(tid)
+                    if ok then
+                        anyOk = true
+                    else
+                        lastErr = err
+                    end
+                end
+                if anyOk then
                     self:showToast("Task cancelled", "success")
                     st.selected = math.max(1, st.selected - 1)
                 else
-                    self:showToast(tostring(err), "danger")
+                    self:showToast(tostring(lastErr or "Failed to cancel"), "danger")
                 end
             end)
         end
@@ -687,7 +757,7 @@ function ui:renderQueue(yTop, yBot, w)
             local name = self.deps.lang.display(t.recipe.id, t.recipe.name)
             local statusStr = "Q"
             if t.status == "running" then
-                statusStr = "R:" .. tostring(t.worker_id)
+                statusStr = "R:" .. (t.worker_str or tostring(t.worker_id or "?"))
             elseif t.status == "paused" then
                 statusStr = "P"
             end
@@ -698,16 +768,25 @@ function ui:renderQueue(yTop, yBot, w)
             st.selected = idx
         end)
         
-        -- Cancel button at the bottom
+        -- Cancel button at the bottom (cancels all subtasks in group)
         widgets.button(self, 1, yBot, w, "Cancel Selected", { kind = "danger" }, function()
             local t = list[st.selected]
             if t then
-                local ok, err = disp:cancelTask(t.id)
-                if ok then
+                local anyOk = false
+                local lastErr = nil
+                for _, tid in ipairs(t.ids) do
+                    local ok, err = disp:cancelTask(tid)
+                    if ok then
+                        anyOk = true
+                    else
+                        lastErr = err
+                    end
+                end
+                if anyOk then
                     self:showToast("Task cancelled", "success")
                     st.selected = math.max(1, st.selected - 1)
                 else
-                    self:showToast(tostring(err), "danger")
+                    self:showToast(tostring(lastErr or "Failed to cancel"), "danger")
                 end
             else
                 self:showToast("No task selected", "danger")

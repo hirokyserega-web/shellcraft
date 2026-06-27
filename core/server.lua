@@ -42,17 +42,101 @@ function server.run()
 
     -- 4. Связь событий -> UI + лог + прогресс
     local uiInstance = nil
+    local activeGroups = {}
+
+    local function getRecipeStats(recipeId)
+        local total = 0
+        local activeCount = 0
+        local runningCount = 0
+        local queuedCount = 0
+        local failedCount = 0
+        local doneCount = 0
+        for _, t in pairs(disp.tasks) do
+            if t.recipe.id == recipeId then
+                total = total + t.count
+                if t.status == "running" or t.status == "queued" then
+                    activeCount = activeCount + t.count
+                    if t.status == "running" then
+                        runningCount = runningCount + t.count
+                    else
+                        queuedCount = queuedCount + t.count
+                    end
+                elseif t.status == "done" then
+                    doneCount = doneCount + t.count
+                elseif t.status == "failed" then
+                    failedCount = failedCount + t.count
+                end
+            end
+        end
+        return {
+            total = total,
+            active = activeCount,
+            running = runningCount,
+            queued = queuedCount,
+            done = doneCount,
+            failed = failedCount
+        }
+    end
+
     local function onEvent(etype, payload)
+        if etype == "task_queued" or etype == "task_requeued" then
+            return
+        end
+
+        local rid = payload and payload.recipe
         local msg = etype
-        if payload then
+        local skipLog = false
+
+        if rid then
+            local stats = getRecipeStats(rid)
+
+            if etype == "task_started" then
+                if not activeGroups[rid] then
+                    activeGroups[rid] = true
+                    msg = "task_started " .. lang.display(rid) .. " x" .. stats.active
+                    if payload.worker and payload.worker ~= "machine" then
+                        msg = msg .. " [turtle #" .. tostring(payload.worker) .. "]"
+                    end
+                else
+                    skipLog = true
+                end
+
+            elseif etype == "task_done" then
+                local activeOther = 0
+                for _, t in pairs(disp.tasks) do
+                    if t.recipe.id == rid and (t.status == "running" or t.status == "queued") and t.id ~= payload.id then
+                        activeOther = activeOther + t.count
+                    end
+                end
+
+                if activeOther == 0 then
+                    msg = "task_done " .. lang.display(rid) .. " x" .. stats.total
+                    activeGroups[rid] = nil
+                    if payload then
+                        payload = { recipe = payload.recipe, count = stats.total, worker = payload.worker }
+                    end
+                else
+                    skipLog = true
+                end
+
+            elseif etype == "task_failed" or etype == "task_timeout" then
+                activeGroups[rid] = nil
+            end
+        end
+
+        if skipLog then return end
+
+        if msg == etype and payload then
             if payload.recipe then msg = msg .. " " .. lang.display(payload.recipe)
             elseif payload.id then msg = msg .. " " .. lang.display(payload.id)
             elseif payload.error then msg = msg .. " " .. tostring(payload.error) end
+            if payload.error and not msg:find(tostring(payload.error), 1, true) then msg = msg .. " " .. tostring(payload.error) end
             if payload.count then msg = msg .. " x" .. payload.count end
             if payload.worker and payload.worker ~= "machine" then
                 msg = msg .. " [turtle #" .. tostring(payload.worker) .. "]"
             end
         end
+
         util.info("[event] " .. msg, true)
         if uiInstance then
             uiInstance:addLog(msg)

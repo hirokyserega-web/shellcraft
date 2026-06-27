@@ -182,22 +182,25 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
         if self.cache[id] and self.cache[id].locations then
             for _, loc in ipairs(self.cache[id].locations) do
                 if toMove <= 0 then break end
-                local p = wrap(loc.p)
-                if p then
-                    local ok2, n = false, 0
-                    if p.pullItems then
-                        ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
-                    end
-                    if not ok2 or not n or n == 0 then
-                        -- Fallback: push from source peripheral
-                        if src.pushItems then
-                            ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
+                -- Skip depositing into the source peripheral itself
+                if loc.p ~= sourcePeripheral then
+                    local p = wrap(loc.p)
+                    if p then
+                        local ok2, n = false, 0
+                        if p.pullItems then
+                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
                         end
-                    end
-                    if ok2 and n and n > 0 then
-                        moved = moved + n
-                        toMove = toMove - n
-                        loc.qty = loc.qty + n
+                        if not ok2 or not n or n == 0 then
+                            -- Fallback: push from source peripheral
+                            if src.pushItems then
+                                ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
+                            end
+                        end
+                        if ok2 and n and n > 0 then
+                            moved = moved + n
+                            toMove = toMove - n
+                            loc.qty = loc.qty + n
+                        end
                     end
                 end
             end
@@ -207,31 +210,34 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
         if toMove > 0 then
             for _, name in ipairs(self.names) do
                 if toMove <= 0 then break end
-                local p = wrap(name)
-                if p and p.size and p.list then
-                    local sz = p.size()
-                    local list = p.list()
-                    for s = 1, sz do
-                        if toMove <= 0 then break end
-                        if not list[s] then
-                            -- This slot is empty
-                            local ok2, n = false, 0
-                            if p.pullItems then
-                                ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, s)
-                            end
-                            if not ok2 or not n or n == 0 then
-                                -- Fallback: push from source peripheral
-                                if src.pushItems then
-                                    ok2, n = pcall(src.pushItems, name, sourceSlot, toMove, s)
+                -- Skip depositing into the source peripheral itself
+                if name ~= sourcePeripheral then
+                    local p = wrap(name)
+                    if p and p.size and p.list then
+                        local sz = p.size()
+                        local list = p.list()
+                        for s = 1, sz do
+                            if toMove <= 0 then break end
+                            if not list[s] then
+                                -- This slot is empty
+                                local ok2, n = false, 0
+                                if p.pullItems then
+                                    ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, s)
                                 end
-                            end
-                            if ok2 and n and n > 0 then
-                                moved = moved + n
-                                toMove = toMove - n
-                                if not self.cache[id] then
-                                    self.cache[id] = { total = 0, locations = {} }
+                                if not ok2 or not n or n == 0 then
+                                    -- Fallback: push from source peripheral
+                                    if src.pushItems then
+                                        ok2, n = pcall(src.pushItems, name, sourceSlot, toMove, s)
+                                    end
                                 end
-                                table.insert(self.cache[id].locations, { p = name, s = s, qty = n })
+                                if ok2 and n and n > 0 then
+                                    moved = moved + n
+                                    toMove = toMove - n
+                                    if not self.cache[id] then
+                                        self.cache[id] = { total = 0, locations = {} }
+                                    end
+                                    table.insert(self.cache[id].locations, { p = name, s = s, qty = n })
+                                end
                             end
                         end
                     end
@@ -253,40 +259,43 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
         local limit = count or 64
         for _, name in ipairs(self.names) do
             if limit <= 0 then break end
-            local p = wrap(name)
-            if p and p.size and p.list then
-                local sz = p.size()
-                local list = p.list()
-                for s = 1, sz do
-                    if limit <= 0 then break end
-                    if not list[s] then
-                        -- Pull blindly into this empty slot
-                        local ok2, n = false, 0
-                        if p.pullItems then
-                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, limit, s)
-                        end
-                        if ok2 and n and n > 0 then
-                            moved = moved + n
-                            limit = limit - n
-                            -- Now wrap/query chest to find out what item we just pulled
-                            local detail
-                            if p.getItemDetail then
-                                local ok3, det = pcall(p.getItemDetail, s)
-                                if ok3 and det then detail = det end
+            -- Skip depositing into the source peripheral itself
+            if name ~= sourcePeripheral then
+                local p = wrap(name)
+                if p and p.size and p.list then
+                    local sz = p.size()
+                    local list = p.list()
+                    for s = 1, sz do
+                        if limit <= 0 then break end
+                        if not list[s] then
+                            -- Pull blindly into this empty slot
+                            local ok2, n = false, 0
+                            if p.pullItems then
+                                ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, limit, s)
                             end
-                            if detail and detail.name then
-                                local item_id = detail.name
-                                if not self.cache[item_id] then
-                                    self.cache[item_id] = { total = 0, locations = {} }
+                            if ok2 and n and n > 0 then
+                                moved = moved + n
+                                limit = limit - n
+                                -- Now wrap/query chest to find out what item we just pulled
+                                local detail
+                                if p.getItemDetail then
+                                    local ok3, det = pcall(p.getItemDetail, s)
+                                    if ok3 and det then detail = det end
                                 end
-                                self.cache[item_id].total = (self.cache[item_id].total or 0) + n
-                                table.insert(self.cache[item_id].locations, { p = name, s = s, qty = n })
+                                if detail and detail.name then
+                                    local item_id = detail.name
+                                    if not self.cache[item_id] then
+                                        self.cache[item_id] = { total = 0, locations = {} }
+                                    end
+                                    self.cache[item_id].total = (self.cache[item_id].total or 0) + n
+                                    table.insert(self.cache[item_id].locations, { p = name, s = s, qty = n })
+                                end
+                            else
+                                -- If we couldn't pull anything, the source slot is likely empty or we can't pull at all.
+                                -- Break out immediately to avoid querying hundreds of other empty slots.
+                                limit = 0
+                                break
                             end
-                        else
-                            -- If we couldn't pull anything, the source slot is likely empty or we can't pull at all.
-                            -- Break out immediately to avoid querying hundreds of other empty slots.
-                            limit = 0
-                            break
                         end
                     end
                 end
@@ -323,8 +332,12 @@ function storage:importFrom(chestName, slotLimit)
         end
     end
 
-    if not targetChest or not peripheral.isPresent(targetChest) then
-        return 0, "No import chest configured or present"
+    if not targetChest or targetChest == "" then
+        return 0, "No import chest configured"
+    end
+
+    if not peripheral.isPresent(targetChest) then
+        return 0, "Import chest '" .. tostring(targetChest) .. "' is not present on the network"
     end
 
     local p = wrap(targetChest)

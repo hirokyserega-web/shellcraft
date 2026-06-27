@@ -44,15 +44,34 @@ end
 --- Найти сетевое имя черепахи по её id.
 -- Перебирает peripheral.getNames(), ищет turtle/computer с matching getID().
 function dispatcher:findTurtleName(workerId)
+    local localSides = { top = true, bottom = true, left = true, right = true, front = true, back = true }
+    
+    -- 1. Сначала ищем по сети (имя не является локальной стороной)
     for _, name in ipairs(peripheral.getNames()) do
-        local ptype = peripheral.getType(name)
-        if ptype == "turtle" or ptype == "computer" then
-            local ok, id = pcall(peripheral.call, name, "getID")
-            if ok and id == workerId then
-                return name
+        if not localSides[name] then
+            local ptype = peripheral.getType(name)
+            if ptype == "turtle" or ptype == "computer" then
+                local ok, id = pcall(peripheral.call, name, "getID")
+                if ok and id == workerId then
+                    return name
+                end
             end
         end
     end
+    
+    -- 2. Вторая попытка: локальные стороны как fallback
+    for _, name in ipairs(peripheral.getNames()) do
+        if localSides[name] then
+            local ptype = peripheral.getType(name)
+            if ptype == "turtle" or ptype == "computer" then
+                local ok, id = pcall(peripheral.call, name, "getID")
+                if ok and id == workerId then
+                    return name
+                end
+            end
+        end
+    end
+    
     return nil
 end
 

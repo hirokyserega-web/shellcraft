@@ -288,20 +288,35 @@ end
 
 --- Feed items and fluids into the station.
 function machines:feed(name, recipe, cycles)
+    local ptype = peripheral.getType(name)
+    local layout = nil
+    if ptype then
+        if machines.SLOTS[ptype] then
+            layout = machines.SLOTS[ptype]
+        else
+            local _, base = ptype:match("^([^:]+):(.+)$")
+            if base and machines.SLOTS[base] then
+                layout = machines.SLOTS[base]
+            end
+        end
+    end
+
     -- 1. Items
     if recipe.itemInput then
-        for _, ing in ipairs(recipe.itemInput) do
+        for idx, ing in ipairs(recipe.itemInput) do
             local need = ing.count * cycles
-            local moved = self.storage:extract(ing.id, need, name, nil)
+            local toSlot = layout and layout.input and layout.input[idx] or nil
+            local moved = self.storage:extract(ing.id, need, name, toSlot)
             if moved < need then
                 return false, "missing " .. (need - moved) .. " " .. ing.id
             end
         end
     elseif recipe.type == "machine" and recipe.input then
         -- Backward-compatibility with old machine recipes
-        for _, ing in ipairs(recipe.input) do
+        for idx, ing in ipairs(recipe.input) do
             local need = ing.count * cycles
-            local moved = self.storage:extract(ing.id, need, name, nil)
+            local toSlot = layout and layout.input and layout.input[idx] or nil
+            local moved = self.storage:extract(ing.id, need, name, toSlot)
             if moved < need then
                 return false, "missing " .. (need - moved) .. " " .. ing.id
             end
@@ -324,6 +339,13 @@ end
 
 --- Check if the expected outputs are present.
 function machines:ready(name, recipe, cycles)
+    local hasItemOut = recipe.itemOutput and #recipe.itemOutput > 0
+    local hasFluidOut = recipe.fluidOutput and #recipe.fluidOutput > 0
+    local isOldMachine = (recipe.type == "machine")
+    if not hasItemOut and not hasFluidOut and not isOldMachine then
+        return nil, "recipe has no defined outputs"
+    end
+
     local p = wrap(name)
     if not p then return false end
     
@@ -419,6 +441,13 @@ function machines:collect(name, recipe)
         end
     end
 
+    -- 3. Drain residual input fluids (P9)
+    if recipe.fluidInput then
+        for _, fi in ipairs(recipe.fluidInput) do
+            self.fluids:depositFluid(name, fi.fluid)
+        end
+    end
+
     return moved
 end
 
@@ -465,7 +494,13 @@ function machines:tick()
             end
             
         elseif job.state == "processing" then
-            if self:ready(job.name, job.recipe, cycles) then
+            local isReady, err = self:ready(job.name, job.recipe, cycles)
+            if err then
+                job.state = "error"
+                emit(self, "machine_error", { name = job.name, error = err })
+                if job.onDone then job.onDone(false, err) end
+                self.jobs[jobId] = nil
+            elseif isReady then
                 job.state = "collecting"
             elseif os.clock() > job.deadline then
                 job.state = "error"

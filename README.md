@@ -184,6 +184,7 @@ shellcraft/
 - **Energy Display**: Energy is displayed in FE (Forge Energy) only. IC2 EU is generally not readable by ComputerCraft and will show as N/A.
 - **Snapshot learning**: The auto-learning snapshot recorder requires the station/machine to finish one full manual processing cycle before you click "Finish & Save".
 - **Danks**: A "dank" is a dedicated fluid tank on the wired network reserved for a single fluid. ShellCraft tracks its fill level and uses it as the primary supply source for recipes before falling back to the general pool. All danks configuration is saved in `config.local.lua`.
+- **Furnace Fuel**: Automated fueling of vanilla furnaces, blast furnaces, and smokers is out of scope and must be managed manually.
 
 ## Лицензия
 

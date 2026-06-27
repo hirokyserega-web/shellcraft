@@ -33,7 +33,7 @@ function server.run()
     local rec = recipes.new(cfg.recipes_file)
     util.info("Loaded recipes: " .. #(rec:all()))
 
-    local mach = machines.new(cfg.peripherals, st, fl)
+    local mach = machines.new(cfg.peripherals, st, fl, cfg)
 
     local disp = dispatcher.new(st, mach, fl)
     disp.recipes = rec
@@ -132,6 +132,7 @@ function server.run()
         fl:resolvePool(resolved)
         fl:scan()
         
+        mach.configData = currentCfg
         mach:refreshStations(resolved)
         
         if uiInstance then
@@ -165,15 +166,25 @@ function server.run()
 
     local function schedulerLoop()
         while true do
-            disp:tick()
-            disp:checkTimeouts((cfg.heartbeat_interval or 10) * 6)
+            local ok, err = pcall(function()
+                disp:tick()
+                disp:checkTimeouts((cfg.heartbeat_interval or 10) * 6)
+            end)
+            if not ok then
+                util.err("Scheduler loop error: " .. tostring(err))
+            end
             os.sleep(0.5)
         end
     end
 
     local function machineLoop()
         while true do
-            mach:tick()
+            local ok, err = pcall(function()
+                mach:tick()
+            end)
+            if not ok then
+                util.err("Machine loop error: " .. tostring(err))
+            end
             os.sleep(0.25)
         end
     end
@@ -181,22 +192,27 @@ function server.run()
     local function storageScanLoop()
         local lastSaveTime = os.clock()
         while true do
-            st:scan()
-            fl:scan()
-            mach:collectReady()
-            -- Периодически пополняем кеш имён и сбрасываем на диск только при новых ID или раз в 60с
-            local newItems = false
-            for id in pairs(st.cache) do
-                if not names.cache[id] then
-                    newItems = true
-                    break
+            local ok, err = pcall(function()
+                st:scan()
+                fl:scan()
+                mach:collectReady()
+                -- Периодически пополняем кеш имён и сбрасываем на диск только при новых ID или раз в 60с
+                local newItems = false
+                for id in pairs(st.cache) do
+                    if not names.cache[id] then
+                        newItems = true
+                        break
+                    end
                 end
-            end
-            local now = os.clock()
-            if newItems or (now - lastSaveTime) > 60 then
-                st:collectNames(names)
-                names.saveCache()
-                lastSaveTime = now
+                local now = os.clock()
+                if newItems or (now - lastSaveTime) > 60 then
+                    st:collectNames(names)
+                    names.saveCache()
+                    lastSaveTime = now
+                end
+            end)
+            if not ok then
+                util.err("Storage scan loop error: " .. tostring(err))
             end
             os.sleep(2)
         end

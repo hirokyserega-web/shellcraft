@@ -29,7 +29,12 @@ end
 -- Возвращает карту { [id] = { total = n, locations = {{p,s,qty}}, name = ... } }.
 function storage:scan()
     local map = {}
+    local count = 0
     for _, name in ipairs(self.names) do
+        count = count + 1
+        if count % 8 == 0 then
+            os.sleep(0)
+        end
         local p = wrap(name)
         if p and type(p.list) == "function" then
             local ok, items = pcall(p.list)

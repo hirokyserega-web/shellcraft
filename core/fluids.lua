@@ -113,9 +113,14 @@ function fluids:scan()
     -- Перезагружаем конфиг, чтобы подхватить изменения из UI
     self:loadConfig()
     
+    local count = 0
     -- 1. Сканируем данки
     self.dank_cache = {}
     for _, dk in ipairs(self.danks) do
+        count = count + 1
+        if count % 8 == 0 then
+            os.sleep(0)
+        end
         local p = wrap(dk.periph)
         local cur = 0
         if p and p.tanks then
@@ -141,6 +146,10 @@ function fluids:scan()
     -- 2. Сканируем общий пул
     local map = {}
     for _, name in ipairs(self.pool_names) do
+        count = count + 1
+        if count % 8 == 0 then
+            os.sleep(0)
+        end
         local p = wrap(name)
         if p and p.tanks then
             local ok, tks = pcall(p.tanks)
@@ -261,6 +270,7 @@ function fluids:extractFluid(fluidName, mb, targetPeriph)
     -- 2. Если нужно ещё, тянем из общего пула
     local info = self.cache[fluidName]
     if info and remaining > 0 then
+        local poolMoved = 0
         for _, loc in ipairs(info.locations) do
             if remaining <= 0 then break end
             local p = wrap(loc.periph)
@@ -279,12 +289,13 @@ function fluids:extractFluid(fluidName, mb, targetPeriph)
                 end
                 if ok and n and n > 0 then
                     moved = moved + n
+                    poolMoved = poolMoved + n
                     remaining = remaining - n
                     loc.amount = loc.amount - n
                 end
             end
         end
-        info.total = info.total - (moved - (mb - remaining)) -- корректируем total
+        info.total = info.total - poolMoved
     end
 
     return moved

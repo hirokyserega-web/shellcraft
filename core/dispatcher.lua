@@ -268,15 +268,77 @@ end
 --- Один тик планировщика.
 function dispatcher:tick()
     if #self.queue == 0 then return end
+
+    -- 1. Обработать ready-задачи типа "machine"/"station" (без участия воркеров)
+    local i = 1
+    while i <= #self.queue do
+        local tid = self.queue[i]
+        local task = self.tasks[tid]
+        if task and task.status == "queued" and self:isTaskReady(task) and (task.recipe.type == "machine" or task.recipe.type == "station") then
+            -- Avoid double craft: if requeued task's output is already in storage, skip
+            local skip = false
+            if task.attempts > 0 and task.recipe and task.recipe.id then
+                local have = self.storage:count(task.recipe.id)
+                if have >= task.count then
+                    util.info("Task " .. task.id .. " already fulfilled (have " .. have .. "), marking done")
+                    task.status = "done"
+                    task.result = { success = true, count = task.count, skipped = true }
+                    emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = task.count })
+                    table.remove(self.queue, i)
+                    skip = true
+                end
+            end
+
+            if not skip then
+                if not self.machines then
+                    task.status = "failed"
+                    task.result = "machine module not connected"
+                    emit(self, "task_failed", { id = task.id, error = task.result })
+                    self:failDependents(task.id, task.result)
+                    table.remove(self.queue, i)
+                else
+                    local jobId, err = self.machines:submit(task.recipe, task.count, function(success, res, elapsed, cycles)
+                        if success then
+                            -- Обновляем avgTime рецепта (время на 1 цикл машины)
+                            if self.recipes and elapsed and cycles and cycles > 0 then
+                                self.recipes:updateTiming(task.recipe.id, elapsed / cycles)
+                            end
+                            task.status = "done"
+                            task.result = { success = true, count = res }
+                            emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = res })
+                        else
+                            task.status = "failed"
+                            task.result = { success = false, error = res }
+                            emit(self, "task_failed", { id = task.id, error = tostring(res) })
+                            self:failDependents(task.id, tostring(res))
+                        end
+                    end)
+                    if jobId then
+                        task.status = "running"
+                        task.worker_id = "machine"
+                        emit(self, "task_started", { id = task.id, worker = "machine", recipe = task.recipe.id, count = task.count })
+                        table.remove(self.queue, i)
+                    else
+                        -- Если нет свободной машины, оставляем в очереди (не удаляем), пробуем в следующий раз
+                        i = i + 1
+                    end
+                end
+            end
+        else
+            i = i + 1
+        end
+    end
+
+    -- 2. Обработать крафтовые задачи черепахой (только shaped/shapeless)
     local workerId = self:findFree()
     if not workerId then return end
 
     local readyIdx = nil
     local task = nil
-    for i, tid in ipairs(self.queue) do
+    for j, tid in ipairs(self.queue) do
         local t = self.tasks[tid]
-        if t and t.status == "queued" and self:isTaskReady(t) then
-            readyIdx = i
+        if t and t.status == "queued" and self:isTaskReady(t) and (t.recipe.type == "shaped" or t.recipe.type == "shapeless") then
+            readyIdx = j
             task = t
             break
         end
@@ -295,43 +357,6 @@ function dispatcher:tick()
             emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = task.count })
             return
         end
-    end
-
-    -- Машинные рецепты обрабатывает сам Core через machines
-    if task.recipe.type == "machine" or task.recipe.type == "station" then
-        if not self.machines then
-            task.status = "failed"
-            task.result = "machine module not connected"
-            emit(self, "task_failed", { id = task.id, error = task.result })
-            self:failDependents(task.id, task.result)
-            return
-        end
-        task.status = "running"
-        task.worker_id = "machine"
-        emit(self, "task_started", { id = task.id, worker = "machine", recipe = task.recipe.id, count = task.count })
-        local jobId, err = self.machines:submit(task.recipe, task.count, function(success, res, elapsed, cycles)
-            if success then
-                -- Обновляем avgTime рецепта (время на 1 цикл машины)
-                if self.recipes and elapsed and cycles and cycles > 0 then
-                    self.recipes:updateTiming(task.recipe.id, elapsed / cycles)
-                end
-                task.status = "done"
-                task.result = { success = true, count = res }
-                emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = res })
-            else
-                task.status = "failed"
-                task.result = { success = false, error = res }
-                emit(self, "task_failed", { id = task.id, error = tostring(res) })
-                self:failDependents(task.id, tostring(res))
-            end
-        end)
-        if not jobId then
-            -- Если нет свободной машины, возвращаем обратно в очередь для повтора
-            table.insert(self.queue, task.id)
-            task.status = "queued"
-            task.worker_id = nil
-        end
-        return
     end
 
     -- Обычный крафт черепахой
@@ -367,6 +392,7 @@ function dispatcher:tick()
     })
     emit(self, "task_started", { id = task.id, worker = workerId, recipe = task.recipe.id, count = task.count })
 end
+
 
 --- Обработать входящее сообщение (вызывается сервером).
 function dispatcher:handleMessage(senderId, msg)

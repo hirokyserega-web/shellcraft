@@ -210,6 +210,10 @@ function dispatcher:cancelTask(taskId, reason)
 end
 
 --- Подготовить ингредиенты: extract из хранилища ПРЯМО в инвентарь черепахи.
+-- Слоты черепахи, которые НЕ являются частью крафтовой сетки.
+-- GRID = {1,2,3,5,6,7,9,10,11}  →  свободные = {4,8,12,13,14,15,16}
+local TURTLE_EXTRA_SLOTS = {4, 8, 12, 13, 14, 15, 16}
+
 function dispatcher:prepareIngredients(workerId, task)
     local turtleName = self:workerName(workerId)
     if not turtleName then
@@ -221,13 +225,36 @@ function dispatcher:prepareIngredients(workerId, task)
     end
     -- Очистить инвентарь черепахи от старых предметов
     self:collectResult(workerId)
+
+    -- Собираем уникальные ID ингредиентов и сколько каждого нужно
     local ings = recipes.ingredientsFor(task.recipe, task.count)
+
+    -- Назначаем каждому уникальному ингредиенту EXTRA_SLOT, чтобы не попасть в GRID
+    local slotForId = {}
+    local slotIdx = 1
     for _, ing in ipairs(ings) do
-        -- Кладём без указания слота — pushItems сам распределит
-        local moved = self.storage:extract(ing.id, ing.count, turtleName, nil)
-        util.info(string.format("Ingredient: moved %d/%d %s -> %s", moved, ing.count, lang.localize(ing.id), turtleName))
+        if not slotForId[ing.id] then
+            if slotIdx > #TURTLE_EXTRA_SLOTS then
+                -- Больше уникальных ингредиентов чем свободных слотов — разрешаем без указания слота
+                slotForId[ing.id] = false
+            else
+                slotForId[ing.id] = TURTLE_EXTRA_SLOTS[slotIdx]
+                slotIdx = slotIdx + 1
+            end
+        end
+    end
+
+    for _, ing in ipairs(ings) do
+        local targetSlot = slotForId[ing.id]  -- конкретный EXTRA слот или false
+        local moved
+        if targetSlot then
+            moved = self.storage:extract(ing.id, ing.count, turtleName, targetSlot)
+        else
+            moved = self.storage:extract(ing.id, ing.count, turtleName, nil)
+        end
+        util.info(string.format("Ingredient: moved %d/%d %s -> %s slot=%s",
+            moved, ing.count, lang.localize(ing.id), turtleName, tostring(targetSlot or "any")))
         if moved < ing.count then
-            -- Не хватило — откат (вернуть всё из черепахи в хранилище)
             self:collectResult(workerId)
             local errMsg = string.format("Missing %d %s (moved %d/%d -> %s)",
                 ing.count - moved, lang.localize(ing.id), moved, ing.count, turtleName)

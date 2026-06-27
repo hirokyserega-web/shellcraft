@@ -11,6 +11,7 @@ function storage.new(peripherals)
     local self = setmetatable({}, storage)
     self.names = {}      -- список имён инвентарей
     self.cache = {}      -- { [id] = { total = n, locations = {{p,s,qty},...} } }
+    self.empty_slots = {} -- кэш свободных слотов для ускорения импорта/депозита
     if peripherals and peripherals.storage then
         for _, name in ipairs(peripherals.storage) do
             table.insert(self.names, name)
@@ -29,6 +30,7 @@ end
 -- Возвращает карту { [id] = { total = n, locations = {{p,s,qty}}, name = ... } }.
 function storage:scan()
     local map = {}
+    local empty = {}
     local count = 0
     for _, name in ipairs(self.names) do
         count = count + 1
@@ -36,24 +38,31 @@ function storage:scan()
             os.sleep(0)
         end
         local p = wrap(name)
-        if p and type(p.list) == "function" then
+        if p and type(p.list) == "function" and type(p.size) == "function" then
             local ok, items = pcall(p.list)
             if ok and items then
-                for slot, info in pairs(items) do
-                    local id = info.name
-                    if id then
-                        local qty = info.count or 0
-                        if not map[id] then
-                            map[id] = { total = 0, locations = {} }
+                local size = p.size() or 0
+                for slot = 1, size do
+                    local info = items[slot]
+                    if info then
+                        local id = info.name
+                        if id then
+                            local qty = info.count or 0
+                            if not map[id] then
+                                map[id] = { total = 0, locations = {} }
+                            end
+                            map[id].total = map[id].total + qty
+                            table.insert(map[id].locations, { p = name, s = slot, qty = qty })
                         end
-                        map[id].total = map[id].total + qty
-                        table.insert(map[id].locations, { p = name, s = slot, qty = qty })
+                    else
+                        table.insert(empty, { p = name, s = slot })
                     end
                 end
             end
         end
     end
     self.cache = map
+    self.empty_slots = empty
     return map
 end
 
@@ -316,9 +325,10 @@ end
 -- @param slotLimit лимит обрабатываемых заполненных слотов (опц.)
 -- @return перемещено предметов, nil | 0, ошибка
 function storage:importFrom(chestName, slotLimit)
-    local cfg = config.load()
     local targetChest = chestName
+    -- Только если имя не передано явно — смотрим в конфиг
     if not targetChest or targetChest == "" then
+        local cfg = config.load()
         targetChest = cfg.default_import
         if not targetChest or targetChest == "" then
             if cfg.import_chests and #cfg.import_chests > 0 then
@@ -345,16 +355,19 @@ function storage:importFrom(chestName, slotLimit)
         return 0, "Chest " .. tostring(targetChest) .. " is not reachable or not a container"
     end
 
+
+    -- Сканируем содержимое импорт-сундука ОДНИРАЗ (не повторяем после каждого хода)
     local list = p.list()
     local size = p.size()
     local totalMoved = 0
     local slotsProcessed = 0
     local hasItems = false
+    local anyFull = false  -- хоть один слот не удалось полностью перелить
 
     for slot = 1, size do
         if list[slot] then
-            local count = list[slot].count or 0
-            if count > 0 then
+            local itemCount = list[slot].count or 0
+            if itemCount > 0 then
                 hasItems = true
                 if slotLimit and slotsProcessed >= slotLimit then
                     break
@@ -363,7 +376,14 @@ function storage:importFrom(chestName, slotLimit)
                 if n > 0 then
                     totalMoved = totalMoved + n
                     slotsProcessed = slotsProcessed + 1
+                    -- Если перенесли не всё — хранилище полное
+                    if n < itemCount then
+                        anyFull = true
+                    end
                     os.sleep(0)
+                elseif n == 0 then
+                    -- Не удалось перенести ни одного — хранилище полное
+                    anyFull = true
                 end
             end
         end
@@ -373,7 +393,7 @@ function storage:importFrom(chestName, slotLimit)
         return 0, "storage_full"
     end
 
-    return totalMoved, nil
+    return totalMoved, anyFull and "partial" or nil
 end
 
 --- Получить displayName предмета из getItemDetail (fallback для локализации).

@@ -275,13 +275,15 @@ function server.run()
 
     local function storageScanLoop()
         local lastSaveTime = os.clock()
+        local lastCfgLoad  = os.clock() - 31  -- force immediate load on first tick
+        local cachedImportChest = nil
         local storageFullLogged = false
         while true do
             local ok, err = pcall(function()
                 st:scan()
                 fl:scan()
                 mach:collectReady()
-                -- Периодически пополняем кеш имён и сбрасываем на диск только при новых ID или раз в 60с
+                -- Периодически пополняем кеш имён и сбрасываем на диск
                 local newItems = false
                 for id in pairs(st.cache) do
                     if not names.cache[id] then
@@ -295,11 +297,18 @@ function server.run()
                     names.saveCache()
                     lastSaveTime = now
                 end
-                
-                -- Авто-импорт после сканирования (без лимита слотов), если настроен сундук импорта
-                local cfg = config.load()
-                if cfg.default_import and cfg.default_import ~= "" then
-                    local count, impErr = st:importFrom(nil, nil)
+
+                -- Перечитываем конфиг раз в 30с чтобы подхватить изменения из Settings
+                if (now - lastCfgLoad) > 30 then
+                    local freshCfg = config.load()
+                    cachedImportChest = (freshCfg.default_import ~= nil and freshCfg.default_import ~= "")
+                        and freshCfg.default_import or nil
+                    lastCfgLoad = now
+                end
+
+                -- Авто-импорт: передаём имя сундука напрямую, не читаем конфиг внутри importFrom
+                if cachedImportChest then
+                    local count, impErr = st:importFrom(cachedImportChest, nil)
                     if impErr == "storage_full" then
                         if not storageFullLogged then
                             util.warn("Storage is full - auto-import paused")
@@ -319,6 +328,7 @@ function server.run()
             os.sleep(2)
         end
     end
+
 
     local function discoveryLoop()
         while true do

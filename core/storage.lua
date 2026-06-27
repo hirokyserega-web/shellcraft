@@ -349,11 +349,13 @@ function storage:importFrom(chestName, slotLimit)
     local size = p.size()
     local totalMoved = 0
     local slotsProcessed = 0
+    local hasItems = false
 
     for slot = 1, size do
         if list[slot] then
             local count = list[slot].count or 0
             if count > 0 then
+                hasItems = true
                 if slotLimit and slotsProcessed >= slotLimit then
                     break
                 end
@@ -361,9 +363,14 @@ function storage:importFrom(chestName, slotLimit)
                 if n > 0 then
                     totalMoved = totalMoved + n
                     slotsProcessed = slotsProcessed + 1
+                    os.sleep(0)
                 end
             end
         end
+    end
+
+    if hasItems and totalMoved == 0 then
+        return 0, "storage_full"
     end
 
     return totalMoved, nil

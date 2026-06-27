@@ -862,7 +862,11 @@ function ui:renderStorage(yTop, yBot, w)
         if count and count > 0 then
             self:showToast(string.format("Imported %d items", count), "success")
         elseif err then
-            self:showToast(tostring(err), "danger")
+            if err == "No import chest configured" then
+                self:showToast("Set Import Chest in Settings first", "danger")
+            else
+                self:showToast(tostring(err), "danger")
+            end
         else
             self:showToast("No items to import", "warning")
         end
@@ -2139,7 +2143,7 @@ end
 ----------------------------------------------------------------
 -- Вкладка НАСТРОЙКИ (Settings)
 ----------------------------------------------------------------
-function ui:openPeripheralPicker(title, filterFn, onSelect)
+function ui:openPeripheralPicker(title, filterFn, onSelect, currentVal, infoText)
     local st = self.state.settings
     st.pickerState = { scroll = 0, selected = 1 }
     st.mode = "picker"
@@ -2153,10 +2157,24 @@ function ui:openPeripheralPicker(title, filterFn, onSelect)
     table.sort(list)
     table.insert(list, 1, "None")
     
+    -- Highlight current selection by default
+    local selectedIdx = 1
+    if currentVal then
+        for idx, name in ipairs(list) do
+            if name == currentVal then
+                selectedIdx = idx
+                break
+            end
+        end
+    end
+    st.pickerState.selected = selectedIdx
+    
     st.picker = {
         title = title,
         list = list,
-        onSelect = onSelect
+        onSelect = onSelect,
+        current = currentVal or "None",
+        info = infoText
     }
 end
 
@@ -2169,12 +2187,22 @@ function ui:renderSettings(yTop, yBot, w)
     
     if st.mode == "picker" and st.picker then
         local bodyFn = function(cx, cy, cw, ch)
+            local yOffset = 0
+            if st.picker.current then
+                widgets.text(cx, cy, "Current: " .. tostring(st.picker.current), colors.yellow, colors.black)
+                yOffset = yOffset + 1
+            end
+            if st.picker.info then
+                widgets.text(cx, cy + yOffset, widgets.clip(st.picker.info, cw), colors.gray, colors.black)
+                yOffset = yOffset + 1
+            end
+            
             local rows = {}
             for idx, name in ipairs(st.picker.list) do
                 local isSel = (st.pickerState.selected == idx)
                 table.insert(rows, (isSel and "[*] " or "[ ] ") .. name)
             end
-            widgets.scrollList(self, cx, cy, cw, ch, rows, st.pickerState, function(idx)
+            widgets.scrollList(self, cx, cy + yOffset, cw, ch - yOffset, rows, st.pickerState, function(idx)
                 st.pickerState.selected = idx
             end)
         end
@@ -2239,7 +2267,7 @@ function ui:renderSettings(yTop, yBot, w)
                 self.deps.fluids:scan()
                 self.deps.machines:refreshStations(resolved)
                 self:buildTabs()
-            end)
+            end, self.configData.grid_chest)
         elseif idx == 2 then
             self:openPeripheralPicker("Select Input Chest", function(name)
                 local ok, p = pcall(peripheral.wrap, name)
@@ -2249,7 +2277,7 @@ function ui:renderSettings(yTop, yBot, w)
                 config.save(self.configData)
                 self:addLog("Recipe input chest: " .. tostring(val))
                 self:showToast("Saved input chest", "success")
-            end)
+            end, self.configData.recipe_input_chest)
         elseif idx == 3 then
             self:openPeripheralPicker("Select Grid Dank", function(name)
                 local ok, p = pcall(peripheral.wrap, name)
@@ -2267,7 +2295,7 @@ function ui:renderSettings(yTop, yBot, w)
                 self.deps.fluids:scan()
                 self.deps.machines:refreshStations(resolved)
                 self:buildTabs()
-            end)
+            end, self.configData.grid_dank)
         elseif idx == 4 then
             self:openPeripheralPicker("Select Import Chest", function(name)
                 local ok, p = pcall(peripheral.wrap, name)
@@ -2276,7 +2304,7 @@ function ui:renderSettings(yTop, yBot, w)
                 self.configData.default_import = val
                 config.save(self.configData)
                 self:addLog("Default import chest: " .. tostring(val))
-                self:showToast("Saved default import chest", "success")
+                self:showToast("Import chest set: " .. tostring(val or "None"), "success")
                 
                 local resolved = config.resolve(self.configData)
                 self.deps.storage.names = resolved.storage or {}
@@ -2285,7 +2313,7 @@ function ui:renderSettings(yTop, yBot, w)
                 self.deps.fluids:scan()
                 self.deps.machines:refreshStations(resolved)
                 self:buildTabs()
-            end)
+            end, self.configData.default_import, "Drop items here, then press Import on Storage tab.")
         end
     end)
 end

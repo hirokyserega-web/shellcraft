@@ -275,7 +275,7 @@ function server.run()
 
     local function storageScanLoop()
         local lastSaveTime = os.clock()
-        local lastImportTime = os.clock()
+        local storageFullLogged = false
         while true do
             local ok, err = pcall(function()
                 st:scan()
@@ -295,10 +295,22 @@ function server.run()
                     names.saveCache()
                     lastSaveTime = now
                 end
-                -- Авто-импорт каждые 5 секунд
-                if (now - lastImportTime) >= 5 then
-                    st:importFrom(nil, 8)
-                    lastImportTime = now
+                
+                -- Авто-импорт после сканирования (без лимита слотов), если настроен сундук импорта
+                local cfg = config.load()
+                if cfg.default_import and cfg.default_import ~= "" then
+                    local count, impErr = st:importFrom(nil, nil)
+                    if impErr == "storage_full" then
+                        if not storageFullLogged then
+                            util.warn("Storage is full - auto-import paused")
+                            storageFullLogged = true
+                        end
+                    elseif count and count > 0 then
+                        if storageFullLogged then
+                            util.info("Storage space available - auto-import resumed")
+                            storageFullLogged = false
+                        end
+                    end
                 end
             end)
             if not ok then

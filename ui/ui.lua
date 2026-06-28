@@ -2278,7 +2278,8 @@ function ui:renderSettings(yTop, yBot, w)
     table.sort(names)
     for _, name in ipairs(names) do
         local ptype = peripheral.getType(name) or "unknown"
-        table.insert(rows, string.format("%s: Connected (%s)", name, ptype))
+        local role = self.configData.manual_roles and self.configData.manual_roles[name] or "auto"
+        table.insert(rows, string.format("%s: %s (%s)", name, role:upper(), ptype))
     end
     
     widgets.scrollList(self, 1, yTop, w, h, rows, st.settingsState, function(idx)
@@ -2347,6 +2348,43 @@ function ui:renderSettings(yTop, yBot, w)
                 self.deps.machines:refreshStations(resolved)
                 self:buildTabs()
             end, self.configData.default_import, "Drop items here, then press Import on Storage tab.")
+        elseif idx >= 6 then
+            local pName = names[idx - 5]
+            if pName then
+                local currentRole = self.configData.manual_roles and self.configData.manual_roles[pName] or "auto"
+                local roles = { "auto", "storage", "machine", "ignored" }
+                
+                local pickerState = { scroll = 0, selected = 1 }
+                for rIdx, r in ipairs(roles) do
+                    if r == currentRole then
+                        pickerState.selected = rIdx
+                    end
+                end
+                
+                st.pickerState = pickerState
+                st.mode = "picker"
+                st.picker = {
+                    title = "Role for " .. pName,
+                    list = roles,
+                    current = currentRole,
+                    info = "Choose role override for this peripheral.",
+                    onSelect = function(val)
+                        self.configData.manual_roles = self.configData.manual_roles or {}
+                        self.configData.manual_roles[pName] = val
+                        config.save(self.configData)
+                        self:addLog("Set role of " .. pName .. " to " .. tostring(val))
+                        self:showToast("Saved role override", "success")
+                        
+                        local resolved = config.resolve(self.configData)
+                        self.deps.storage.names = resolved.storage or {}
+                        self.deps.storage:scan()
+                        self.deps.fluids:resolvePool(resolved)
+                        self.deps.fluids:scan()
+                        self.deps.machines:refreshStations(resolved)
+                        self:buildTabs()
+                    end
+                }
+            end
         end
     end)
 end

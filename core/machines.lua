@@ -169,29 +169,47 @@ function machines:info(name)
         local ok, list = pcall(p.list)
         if ok and list then
             info.inventory_size = p.size() or 0
-            local function isFilled(slot) return list[slot] ~= nil end
-            if slots and slots.fuel then
-                for _, s in ipairs(slots.fuel) do
-                    if isFilled(s) then info.fuel = info.fuel + 1 end
-                end
-            end
-            if slots and slots.input then
-                for _, s in ipairs(slots.input) do
-                    if isFilled(s) then
-                        table.insert(info.input_items, list[s].name)
-                        info.cooking = true
+            -- Only apply slot-based cooking/ready semantics for real furnace-type machines
+            local isFurnaceType = (ptype and (
+                ptype:find("furnace") or ptype:find("smoker") or
+                ptype:find("brewer") or ptype:find("kiln") or
+                ptype:find("smelter") or ptype:find("smelt")
+            ))
+            if isFurnaceType and slots then
+                local function isFilled(slot) return list[slot] ~= nil end
+                if slots.fuel then
+                    for _, s in ipairs(slots.fuel) do
+                        if isFilled(s) then info.fuel = info.fuel + 1 end
                     end
                 end
-            end
-            if slots and slots.output then
-                for _, s in ipairs(slots.output) do
-                    if isFilled(s) then
-                        table.insert(info.output_items, list[s].name .. " x" .. list[s].count)
+                if slots.input then
+                    for _, s in ipairs(slots.input) do
+                        if isFilled(s) then
+                            table.insert(info.input_items, list[s].name)
+                            info.cooking = true
+                        end
                     end
                 end
+                if slots.output then
+                    for _, s in ipairs(slots.output) do
+                        if isFilled(s) then
+                            table.insert(info.output_items, list[s].name .. " x" .. list[s].count)
+                        end
+                    end
+                end
+                info.busy = info.cooking and #info.output_items == 0
+                info.ready = #info.output_items > 0
+            else
+                -- For generic chest/station: just report what's inside, no cooking semantics
+                for slot, item in pairs(list) do
+                    if item and item.name then
+                        table.insert(info.input_items, item.name)
+                    end
+                end
+                -- A chest-station is "ready" only if a job is in collecting state
+                info.cooking = false
+                info.ready = false
             end
-            info.busy = info.cooking and #info.output_items == 0
-            info.ready = #info.output_items > 0
         end
     end
     
@@ -391,15 +409,35 @@ function machines:ready(name, recipe, cycles)
     -- Fallback for old-style machine recipes
     if recipe.type == "machine" and not recipe.itemOutput then
         local slots = self:_slots(name)
-        if not slots or not slots.output then return false end
+        if not slots then return false end
         if not p.list then return false end
         local ok, list = pcall(p.list)
         if not ok or not list then return false end
-        local hasResult = false
-        for _, s in ipairs(slots.output) do
-            if list[s] ~= nil then hasResult = true; break end
+        
+        local targetId = recipe.id
+        local targetCount = (recipe.output or 1) * cycles
+        local ptype = (peripheral.getType(name) or ""):lower()
+        local isFurnaceType = ptype:find("furnace") or ptype:find("smelt") or ptype:find("cook") or ptype:find("kiln") or ptype:find("smoker") or ptype:find("brewer")
+        
+        if isFurnaceType and slots.output then
+            local currentCount = 0
+            for _, s in ipairs(slots.output) do
+                local item = list[s]
+                if item and item.name == targetId then
+                    currentCount = currentCount + (item.count or 0)
+                end
+            end
+            return currentCount >= targetCount
+        else
+            -- Generic chest/station: check all slots for the target output item
+            local currentCount = 0
+            for _, item in pairs(list) do
+                if item and item.name == targetId then
+                    currentCount = currentCount + (item.count or 0)
+                end
+            end
+            return currentCount >= targetCount
         end
-        return hasResult
     end
 
     return true

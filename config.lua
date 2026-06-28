@@ -31,6 +31,7 @@ config.defaults = {
         modems    = {},
         machines  = {},
     },
+    manual_roles = {},
 }
 
 --- Загрузить конфиг (с локальными переопределениями).
@@ -152,16 +153,16 @@ function config.detect()
     return detected
 end
 
---- Объединить автоопределённое с ручным.
 function config.resolve(cfg)
     local auto = config.detect()
     local result = { storage = {}, monitors = {}, modems = {}, machines = {} }
+    local manual_roles = cfg.manual_roles or {}
     
     -- 1. Сначала разрешаем машины
     local manualMachines = cfg.peripherals and cfg.peripherals.machines
     local machinesSet = {}
     
-    -- Всегда добавляем ручные машины
+    -- Всегда добавляем ручные машины из старого конфига
     if manualMachines and #manualMachines > 0 then
         for _, name in ipairs(manualMachines) do
             if peripheral.isPresent(name) then
@@ -171,9 +172,19 @@ function config.resolve(cfg)
         end
     end
     
-    -- Всегда добавляем также автоопределённые машины
+    -- Добавляем машины из manual_roles
+    for name, role in pairs(manual_roles) do
+        if role == "machine" and peripheral.isPresent(name) then
+            if not machinesSet[name] then
+                table.insert(result.machines, name)
+                machinesSet[name] = true
+            end
+        end
+    end
+    
+    -- Добавляем автоопределённые машины (если они не переопределены вручную)
     for _, name in ipairs(auto.machines or {}) do
-        if not machinesSet[name] then
+        if not machinesSet[name] and manual_roles[name] ~= "storage" and manual_roles[name] ~= "ignored" then
             table.insert(result.machines, name)
             machinesSet[name] = true
         end
@@ -204,16 +215,30 @@ function config.resolve(cfg)
                 for _, name in ipairs(manual) do
                     if peripheral.isPresent(name) then
                         local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
-                        if not isExcluded then
+                        if not isExcluded and manual_roles[name] ~= "ignored" then
                             table.insert(result[k], name)
                         end
                     end
                 end
             else
+                -- Сначала добавим те, у которых manual_roles[name] == k
+                local added_manual = {}
+                for name, role in pairs(manual_roles) do
+                    if role == k and peripheral.isPresent(name) then
+                        local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
+                        if not isExcluded then
+                            table.insert(result[k], name)
+                            added_manual[name] = true
+                        end
+                    end
+                end
+
                 for _, name in ipairs(auto[k] or {}) do
-                    local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
-                    if not isExcluded then
-                        table.insert(result[k], name)
+                    if not added_manual[name] and manual_roles[name] ~= "ignored" and manual_roles[name] ~= "machine" then
+                        local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
+                        if not isExcluded then
+                            table.insert(result[k], name)
+                        end
                     end
                 end
             end

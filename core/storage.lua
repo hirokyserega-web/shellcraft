@@ -355,6 +355,10 @@ function storage:importFrom(chestName, slotLimit)
         return 0, "Chest " .. tostring(targetChest) .. " is not reachable or not a container"
     end
 
+    if not self.names or #self.names == 0 then
+        return 0, "No storage chests/barrels connected to the network"
+    end
+
 
     -- Сканируем содержимое импорт-сундука ОДНИРАЗ (не повторяем после каждого хода)
     local list = p.list()

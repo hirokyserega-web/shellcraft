@@ -35,6 +35,28 @@ local function getCycles(recipe, count)
     end
 end
 
+local function slotsRequired(recipe, cycles)
+    local slots = 0
+    if recipe.itemInput then
+        for _, ing in ipairs(recipe.itemInput) do
+            slots = slots + math.ceil((cycles * (ing.count or 1)) / 64)
+        end
+    elseif recipe.input then
+        for _, ing in ipairs(recipe.input) do
+            local icount = type(ing) == "table" and ing.count or 1
+            slots = slots + math.ceil((cycles * icount) / 64)
+        end
+    end
+    if recipe.itemOutput then
+        for _, out in ipairs(recipe.itemOutput) do
+            slots = slots + math.ceil((cycles * (out.count or 1)) / 64)
+        end
+    elseif recipe.output then
+        slots = slots + math.ceil((cycles * (recipe.output or 1)) / 64)
+    end
+    return math.max(1, slots)
+end
+
 --- Create a machines manager.
 function machines.new(peripherals, storage, fluids)
     local self = setmetatable({}, machines)
@@ -576,29 +598,68 @@ function machines:tick()
         job.cycles_done = job.cycles_done or 0
         job.total_moved = job.total_moved or 0
         
+        -- Resolve layout and size
+        local ptype = peripheral.getType(job.name)
+        local layout = nil
+        if ptype then
+            if machines.SLOTS[ptype] then
+                layout = machines.SLOTS[ptype]
+            else
+                local _, base = ptype:match("^([^:]+):(.+)$")
+                if base and machines.SLOTS[base] then
+                    layout = machines.SLOTS[base]
+                end
+            end
+        end
+        local size = 1
+        local ok, s = pcall(peripheral.call, job.name, "size")
+        if ok and type(s) == "number" then
+            size = s
+        end
+
         -- Calculate maxCycles chunk size based on recipe inputs and outputs
         local maxCycles = 64
         local recipe = job.recipe
-        if recipe.itemInput then
-            for _, ing in ipairs(recipe.itemInput) do
-                local limit = math.floor(64 / math.max(1, ing.count or 1))
+        
+        if layout == nil and size > 1 then
+            -- Generic storage / chest: calculate max cycles based on inventory slots
+            local remaining = job.total_cycles - job.cycles_done
+            local low = 1
+            local high = remaining
+            local best = 1
+            while low <= high do
+                local mid = math.floor((low + high) / 2)
+                if slotsRequired(recipe, mid) <= size then
+                    best = mid
+                    low = mid + 1
+                else
+                    high = mid - 1
+                end
+            end
+            maxCycles = best
+        else
+            -- Machine with specific slots: restrict so that each input/output fits in a single slot stack (64 items)
+            if recipe.itemInput then
+                for _, ing in ipairs(recipe.itemInput) do
+                    local limit = math.floor(64 / math.max(1, ing.count or 1))
+                    maxCycles = math.min(maxCycles, limit)
+                end
+            elseif recipe.input then
+                for _, ing in ipairs(recipe.input) do
+                    local icount = type(ing) == "table" and ing.count or 1
+                    local limit = math.floor(64 / math.max(1, icount))
+                    maxCycles = math.min(maxCycles, limit)
+                end
+            end
+            if recipe.itemOutput then
+                for _, out in ipairs(recipe.itemOutput) do
+                    local limit = math.floor(64 / math.max(1, out.count or 1))
+                    maxCycles = math.min(maxCycles, limit)
+                end
+            elseif recipe.output then
+                local limit = math.floor(64 / math.max(1, recipe.output))
                 maxCycles = math.min(maxCycles, limit)
             end
-        elseif recipe.input then
-            for _, ing in ipairs(recipe.input) do
-                local icount = type(ing) == "table" and ing.count or 1
-                local limit = math.floor(64 / math.max(1, icount))
-                maxCycles = math.min(maxCycles, limit)
-            end
-        end
-        if recipe.itemOutput then
-            for _, out in ipairs(recipe.itemOutput) do
-                local limit = math.floor(64 / math.max(1, out.count or 1))
-                maxCycles = math.min(maxCycles, limit)
-            end
-        elseif recipe.output then
-            local limit = math.floor(64 / math.max(1, recipe.output))
-            maxCycles = math.min(maxCycles, limit)
         end
         maxCycles = math.max(1, maxCycles)
         
@@ -625,20 +686,6 @@ function machines:tick()
             local chunkInputs = getChunkInputs(recipe, chunk)
             local allFed = true
             local missingStorageError = nil
-            
-            -- Resolve layout
-            local ptype = peripheral.getType(job.name)
-            local layout = nil
-            if ptype then
-                if machines.SLOTS[ptype] then
-                    layout = machines.SLOTS[ptype]
-                else
-                    local _, base = ptype:match("^([^:]+):(.+)$")
-                    if base and machines.SLOTS[base] then
-                        layout = machines.SLOTS[base]
-                    end
-                end
-            end
             
             for _, input in ipairs(chunkInputs) do
                 local fed = job.fed_items[input.id] or 0

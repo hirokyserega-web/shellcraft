@@ -39,7 +39,7 @@ function ui.new(monitor, deps)
     self.settingsLoaded = false
     
     self.state = {
-        craft    = { scroll = 0, selected = 1, mode = "list", qty = "1", active = nil },
+        craft    = { scroll = 0, selected = 1, mode = "list", qty = "1", active = nil, search = "", showKeyboard = false },
         queue    = { scroll = 0, selected = 1 },
         storage  = { scroll = 0, selected = 1, search = "", showKeyboard = false, tab = "items" },
         machines = { scroll = 0, selected = 1 },
@@ -368,11 +368,29 @@ function ui:renderCraft(yTop, yBot, w)
     st.categoryIdx = catIdx
     local currentCat = categories[catIdx]
     
+    -- 2. Фильтрация списка рецептов
+    local search = (st.search or ""):lower()
+    local filteredList = {}
+    for _, r in ipairs(list) do
+        local mod = r.id:match("^([^:]+):") or "minecraft"
+        if currentCat == "All" or mod == currentCat then
+            local name = self.deps.lang.display(r.id, r.name):lower()
+            if search == "" or name:find(search, 1, true) or r.id:lower():find(search, 1, true) then
+                table.insert(filteredList, r)
+            end
+        end
+    end
+    
+    local useSplit = (w >= 45)
+    local leftW = useSplit and math.floor(w * 0.6) or w
+    local rightW = w - leftW - 1
+    local rightX = leftW + 2
+    
     -- Отрисовка строки категорий
     term.setBackgroundColor(colors.gray)
     term.setTextColor(colors.white)
     term.setCursorPos(1, yTop)
-    term.clearLine()
+    term.write(string.rep(" ", leftW))
     
     term.setCursorPos(2, yTop)
     term.write("<")
@@ -384,9 +402,9 @@ function ui:renderCraft(yTop, yBot, w)
         self.dirty = true
     end)
     
-    term.setCursorPos(w - 1, yTop)
+    term.setCursorPos(leftW - 1, yTop)
     term.write(">")
-    self:addHit(w - 2, yTop, 3, 1, function()
+    self:addHit(leftW - 2, yTop, 3, 1, function()
         st.categoryIdx = st.categoryIdx + 1
         if st.categoryIdx > #categories then st.categoryIdx = 1 end
         st.selected = 1
@@ -395,44 +413,92 @@ function ui:renderCraft(yTop, yBot, w)
     end)
     
     local catLabel = "[" .. currentCat .. "]"
-    local labelX = math.floor((w - #catLabel) / 2) + 1
+    local labelX = math.floor((leftW - #catLabel) / 2) + 1
     if labelX < 4 then labelX = 4 end
     term.setCursorPos(labelX, yTop)
-    term.write(widgets.clip(catLabel, w - 8))
+    term.write(widgets.clip(catLabel, leftW - 8))
     
-    -- 2. Фильтрация списка рецептов
-    local filteredList = {}
-    for _, r in ipairs(list) do
-        local mod = r.id:match("^([^:]+):") or "minecraft"
-        if currentCat == "All" or mod == currentCat then
-            table.insert(filteredList, r)
-        end
-    end
+    -- Search box
+    local searchY = yTop + 1
+    widgets.clearArea(1, searchY, leftW, 1)
+    local searchLabel = "Search: " .. (st.search or "") .. "_"
+    widgets.text(1, searchY, widgets.clip(searchLabel, leftW - 14), colors.yellow, colors.black)
     
-    local listY = yTop + 1
-    local listH = h - 1
+    widgets.button(self, leftW - 12, searchY, 6, "Keybd", { selected = st.showKeyboard }, function()
+        st.showKeyboard = not st.showKeyboard
+    end)
+    widgets.button(self, leftW - 5, searchY, 5, "Clear", { kind = "danger" }, function()
+        st.search = ""
+        st.selected = 1
+        st.scroll = 0
+    end)
+    
+    local listY = yTop + 2
+    local listH = h - 2
     
     if #filteredList == 0 then
-        widgets.center(math.floor((listY + yBot) / 2), "No recipes in this category", colors.red)
+        widgets.clearArea(1, listY, leftW, listH)
+        widgets.center(math.floor((listY + yBot) / 2), "No recipes match", colors.red)
     else
-        -- В режиме списка показываем ScrollList
         local items = {}
         for _, r in ipairs(filteredList) do
             local name = self.deps.lang.display(r.id, r.name)
             local have = self.deps.storage:count(r.id)
             local typeStr = r.type == "machine" and " [M]" or ""
-            local tStr = r.avgTime and string.format(" ~%.0fs", r.avgTime) or ""
-            table.insert(items, string.format("%s x%d%s (Have:%d)%s", name, r.output or 1, typeStr, have, tStr))
+            table.insert(items, string.format("%s x%d%s (Have:%d)", name, r.output or 1, typeStr, have))
         end
         
-        widgets.scrollList(self, 1, listY, w, listH, items, st, function(idx)
+        widgets.scrollList(self, 1, listY, leftW, listH, items, st, function(idx)
             st.selected = idx
-            st.mode = "quantity"
-            st.qty = "1"
+            if not useSplit then
+                st.mode = "quantity"
+                st.qty = "1"
+            end
         end)
     end
     
-    -- Отрисовка модального диалога заказа крафта
+    if useSplit then
+        -- Draw separator line
+        term.setBackgroundColor(colors.black)
+        for cy = yTop, yBot do
+            term.setCursorPos(leftW + 1, cy)
+            term.setTextColor(colors.gray)
+            term.write("|")
+        end
+        
+        widgets.clearArea(rightX, yTop, rightW, h)
+        local r = filteredList[st.selected]
+        if not r and #filteredList > 0 then
+            st.selected = 1
+            r = filteredList[1]
+        end
+        
+        if r then
+            local displayName = self.deps.lang.display(r.id, r.name)
+            widgets.text(rightX, yTop, "Recipe Preview", colors.cyan, colors.black)
+            widgets.text(rightX, yTop + 1, widgets.clip(displayName, rightW), colors.white, colors.black)
+            widgets.text(rightX, yTop + 3, "Mod: " .. prettyModName(r.id:match("^([^:]+):") or "minecraft"), colors.lightGray, colors.black)
+            widgets.text(rightX, yTop + 4, "Type: " .. r.type, colors.lightGray, colors.black)
+            widgets.text(rightX, yTop + 5, "Yield: " .. (r.output or 1), colors.lightGray, colors.black)
+            
+            local inStore = self.deps.storage:count(r.id)
+            widgets.text(rightX, yTop + 6, "In Storage: " .. inStore, colors.yellow, colors.black)
+            
+            if r.avgTime then
+                widgets.text(rightX, yTop + 7, "Avg Time: " .. string.format("%.1fs", r.avgTime), colors.lightGray, colors.black)
+            end
+            
+            local btnH = 3
+            local btnY = yBot - btnH + 1
+            widgets.button(self, rightX, btnY, rightW, "Order Craft", { kind = "active" }, function()
+                st.mode = "quantity"
+                st.qty = "1"
+            end)
+        else
+            widgets.center(math.floor((yTop + yBot) / 2), "Select a recipe", colors.gray)
+        end
+    end
+    
     if st.mode == "quantity" then
         local r = filteredList[st.selected]
         if not r then st.mode = "list"; return end
@@ -441,13 +507,31 @@ function ui:renderCraft(yTop, yBot, w)
         local inStore = self.deps.storage:count(r.id)
         local qty = tonumber(st.qty) or 1
         
-        -- Проверяем, влезает ли Numpad
-        -- Для Numpad требуется 11 символов ширины и 4 строки высоты
-        local showNumpad = (w >= 30 and h >= 10)
-        
         local bodyFn = function(cx, cy, cw, ch)
-            widgets.text(cx, cy, "Item: " .. widgets.clip(name, cw), colors.white, colors.black)
-            widgets.text(cx, cy + 1, string.format("Have: %d  Output: %d", inStore, r.output or 1), colors.lightGray, colors.black)
+            local showSplitDialog = (cw >= 38)
+            local dLeftW = showSplitDialog and math.floor(cw * 0.5) or cw
+            local dRightW = cw - dLeftW - 1
+            local dRightX = cx + dLeftW + 1
+            
+            local maxCraft = 6400
+            local ings = self.deps.recipes.ingredientsOf(r)
+            for _, ing in ipairs(ings) do
+                local have = self.deps.storage:count(ing.id)
+                if ing.count > 0 then
+                    maxCraft = math.min(maxCraft, math.floor(have / ing.count))
+                end
+            end
+            local fls = self.deps.recipes.fluidsOf(r)
+            for _, fl in ipairs(fls) do
+                local have = self.deps.fluids:count(fl.fluid)
+                if fl.mb > 0 then
+                    maxCraft = math.min(maxCraft, math.floor(have / fl.mb))
+                end
+            end
+            maxCraft = math.max(1, maxCraft * (r.output or 1))
+            
+            widgets.text(cx, cy, widgets.clip("Item: " .. name, dLeftW), colors.white, colors.black)
+            widgets.text(cx, cy + 1, string.format("Have: %d  Yield: %d", inStore, r.output or 1), colors.lightGray, colors.black)
             
             local crafts = math.ceil(qty / (r.output or 1))
             local actualQty = crafts * (r.output or 1)
@@ -457,90 +541,120 @@ function ui:renderCraft(yTop, yBot, w)
             end
             widgets.text(cx, cy + 2, qtyText, colors.yellow, colors.black)
             
-            -- Вычисляем ETA и BOM
-            if qty > 0 then
-                local tree = planner.buildTree(r.id, qty, recipes, self.deps.storage, self.deps.fluids)
-                local estTime, approx = planner.estimateTime(tree, self:workersCount(), recipes)
-                widgets.text(cx, cy + 3, "ETA: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green, colors.black)
-
-                -- BOM: показываем только то, что реально нужно дополнительно добыть/скрафтить
-                -- Используем planner.bom() — он возвращает базовые ресурсы (листья без рецепта)
-                local rawBom = planner.bom(tree)
-                -- Строим отсортированный список: сначала нехватает, потом всё остальное
-                local bomList = {}
-                for id, need in pairs(rawBom.items) do
-                    -- Скрываем сам крафтуемый предмет из BOM (он не является ингредиентом)
-                    if id ~= r.id then
-                        table.insert(bomList, { id = id, need = need })
-                    end
-                end
-                table.sort(bomList, function(a, b)
-                    local ha = self.deps.storage:count(a.id)
-                    local hb = self.deps.storage:count(b.id)
-                    local misA = ha < a.need
-                    local misB = hb < b.need
-                    if misA ~= misB then return misA end  -- нехватка — вверх
-                    return a.id < b.id
-                end)
-
-                -- Оставляем место для Stepper (cy+4) и кнопок (cy+ch-1)
-                local bomYStart = cy + 5
-                local bomYMax   = cy + ch - 2  -- -2 чтобы не налезать на Stepper
-
-                if ch >= 7 and #bomList > 0 then
-                    widgets.text(cx, cy + 4, "Requires:", colors.cyan, colors.black)
-                    local yLine = bomYStart
-                    for _, info in ipairs(bomList) do
-                        if yLine > bomYMax then break end
-                        local have = self.deps.storage:count(info.id)
-                        local col = have >= info.need and colors.green or colors.red
-                        widgets.text(cx, yLine,
-                            string.format(" %s %d/%d",
-                                widgets.clip(self.deps.lang.display(info.id), cw - 10),
-                                have, info.need),
-                            col, colors.black)
-                        yLine = yLine + 1
-                    end
-                    -- Жидкости
-                    for _, info in ipairs(rawBom.fluids or {}) do
-                        if yLine > bomYMax then break end
-                        local have = self.deps.fluids:count(info.fluid)
-                        local col = have >= info.mb and colors.green or colors.red
-                        widgets.text(cx, yLine,
-                            string.format(" %s %d/%d mB",
-                                widgets.clip(util.formatId(info.fluid), cw - 14),
-                                have, info.mb),
-                            col, colors.black)
-                        yLine = yLine + 1
-                    end
-                elseif ch >= 6 and #bomList == 0 then
-                    widgets.text(cx, cy + 4, "All resources available", colors.green, colors.black)
+            local prY = cy + 4
+            widgets.button(self, cx, prY, 4, "+1", { kind = "normal" }, function()
+                local q = (tonumber(st.qty) or 0) + 1
+                st.qty = tostring(q)
+            end)
+            widgets.button(self, cx + 5, prY, 5, "+10", { kind = "normal" }, function()
+                local q = (tonumber(st.qty) or 0) + 10
+                st.qty = tostring(q)
+            end)
+            widgets.button(self, cx + 11, prY, 5, "+64", { kind = "normal" }, function()
+                local q = (tonumber(st.qty) or 0) + 64
+                st.qty = tostring(q)
+            end)
+            
+            widgets.button(self, cx, prY + 1, 5, "Max", { kind = "normal" }, function()
+                st.qty = tostring(maxCraft)
+            end)
+            widgets.button(self, cx + 6, prY + 1, 5, "Clear", { kind = "danger" }, function()
+                st.qty = "1"
+            end)
+            
+            local tree = planner.buildTree(r.id, qty, self.deps.recipes, self.deps.storage, self.deps.fluids)
+            local estTime, approx = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
+            
+            widgets.text(cx, prY + 3, "ETA: " .. planner.formatDuration(estTime, approx), approx and colors.yellow or colors.green, colors.black)
+            
+            local rawBom = planner.bom(tree)
+            local bomList = {}
+            for id, need in pairs(rawBom.items) do
+                if id ~= r.id then
+                    table.insert(bomList, { type = "item", id = id, need = need })
                 end
             end
+            for flName, mb in pairs(rawBom.fluids) do
+                table.insert(bomList, { type = "fluid", id = flName, need = mb })
+            end
             
-            -- Рисуем Numpad или Stepper
-            if showNumpad then
-                widgets.numpad(self, cx + cw - 11, cy, function(key)
-                    if key == "<-" then
-                        st.qty = st.qty:sub(1, -2)
-                        if st.qty == "" then st.qty = "1" end
-                    elseif key == "C" then
-                        st.qty = "1"
-                    else
-                        if st.qty == "0" or st.qty == "1" then st.qty = key else st.qty = st.qty .. key end
+            table.sort(bomList, function(a, b)
+                local ha = a.type == "item" and self.deps.storage:count(a.id) or self.deps.fluids:count(a.id)
+                local hb = b.type == "item" and self.deps.storage:count(b.id) or self.deps.fluids:count(b.id)
+                local misA = ha < a.need
+                local misB = hb < b.need
+                if misA ~= misB then return misA end
+                return a.id < b.id
+            end)
+            
+            if showSplitDialog then
+                for dy = cy, cy + ch - 1 do
+                    term.setCursorPos(dRightX - 1, dy)
+                    term.setTextColor(colors.gray)
+                    term.write("|")
+                end
+                
+                widgets.text(dRightX, cy, "Requires:", colors.cyan, colors.black)
+                local yLine = cy + 1
+                local yMax = cy + ch - 1
+                
+                if #bomList == 0 then
+                    widgets.text(dRightX, yLine, "All resources OK", colors.green, colors.black)
+                else
+                    for _, info in ipairs(bomList) do
+                        if yLine > yMax then break end
+                        if info.type == "item" then
+                            local have = self.deps.storage:count(info.id)
+                            local col = have >= info.need and colors.green or colors.red
+                            widgets.text(dRightX, yLine,
+                                string.format(" %s %d/%d",
+                                    widgets.clip(self.deps.lang.display(info.id), dRightW - 10),
+                                    have, info.need),
+                                col, colors.black)
+                        else
+                            local have = self.deps.fluids:count(info.id)
+                            local col = have >= info.need and colors.green or colors.red
+                            widgets.text(dRightX, yLine,
+                                string.format(" %s %d/%d mB",
+                                    widgets.clip(util.formatId(info.id), dRightW - 14),
+                                    have, info.need),
+                                col, colors.black)
+                        end
+                        yLine = yLine + 1
                     end
-                end)
-                -- Также добавляем компактный Stepper внизу
-                local step = r.output or 1
-                widgets.stepper(self, cx, cy + 4, cw - 13, qty, function(delta)
-                    st.qty = tostring(math.max(step, qty + delta * step))
-                end)
+                end
             else
-                -- Если Numpad не влезает, используем только Stepper на всю ширину
-                local step = r.output or 1
-                widgets.stepper(self, cx, cy + 4, cw, qty, function(delta)
-                    st.qty = tostring(math.max(step, qty + delta * step))
-                end)
+                local yLine = prY + 5
+                local yMax = cy + ch - 1
+                if yLine <= yMax then
+                    widgets.text(cx, yLine, "BOM Status:", colors.cyan, colors.black)
+                    yLine = yLine + 1
+                    if #bomList == 0 then
+                        widgets.text(cx + 1, yLine, "All resources OK", colors.green, colors.black)
+                    else
+                        for _, info in ipairs(bomList) do
+                            if yLine > yMax then break end
+                            if info.type == "item" then
+                                local have = self.deps.storage:count(info.id)
+                                local col = have >= info.need and colors.green or colors.red
+                                widgets.text(cx + 1, yLine,
+                                    string.format("%s %d/%d",
+                                        widgets.clip(self.deps.lang.display(info.id), cw - 12),
+                                        have, info.need),
+                                    col, colors.black)
+                            else
+                                local have = self.deps.fluids:count(info.id)
+                                local col = have >= info.need and colors.green or colors.red
+                                widgets.text(cx + 1, yLine,
+                                    string.format("%s %d/%d mB",
+                                        widgets.clip(util.formatId(info.id), cw - 16),
+                                        have, info.need),
+                                    col, colors.black)
+                            end
+                            yLine = yLine + 1
+                        end
+                    end
+                end
             end
         end
         
@@ -551,12 +665,12 @@ function ui:renderCraft(yTop, yBot, w)
                 action = function()
                     local n = tonumber(st.qty) or 0
                     if n > 0 then
-                        local ids, err = self.deps.dispatcher:requestCraft(r.id, n, recipes)
+                        local ids, err = self.deps.dispatcher:requestCraft(r.id, n, self.deps.recipes)
                         if ids then
-                            self:showToast(string.format("Queued: %s x%d (%d steps)", widgets.clip(name, 12), n, #ids), "success")
+                            self:showToast(string.format("Queued: %s x%d", widgets.clip(name, 12), n), "success")
                             self:addLog("Queued order: " .. name .. " x" .. n)
-                            local tree = planner.buildTree(r.id, n, recipes, self.deps.storage, self.deps.fluids)
-                            local estTime = planner.estimateTime(tree, self:workersCount(), recipes)
+                            local tree = planner.buildTree(r.id, n, self.deps.recipes, self.deps.storage, self.deps.fluids)
+                            local estTime = planner.estimateTime(tree, self:workersCount(), self.deps.recipes)
                             self.state.craft.active = {
                                 total = #ids, done = 0, failed = 0,
                                 etaTotal = estTime, started = os.epoch("utc"),
@@ -564,7 +678,6 @@ function ui:renderCraft(yTop, yBot, w)
                             st.mode = "list"
                             st.qty = "1"
                         else
-                            -- Toast об ошибке, но ДИАЛОГ ОСТАВЛЯЕМ ОТКРЫТЫМ!
                             self:showToast(tostring(err), "danger")
                             self:addLog("Order Error: " .. tostring(err))
                         end
@@ -2498,15 +2611,24 @@ end
 --- Обработать ввод символа с клавиатуры.
 function ui:handleChar(ch)
     local tab = self.activeTab
-    if tab == "craft" and self.state.craft.mode == "quantity" then
+    if tab == "craft" then
         local st = self.state.craft
-        if ch:match("%d") then
-            if st.qty == "0" or st.qty == "1" then
-                st.qty = ch
-            else
-                st.qty = st.qty .. ch
+        if st.mode == "quantity" then
+            if ch:match("%d") then
+                if st.qty == "0" or st.qty == "1" then
+                    st.qty = ch
+                else
+                    st.qty = st.qty .. ch
+                end
+                self.dirty = true
             end
-            self.dirty = true
+        else
+            if ch:match("%S") or ch == " " then
+                st.search = (st.search or "") .. ch
+                st.scroll = 0
+                st.selected = 1
+                self.dirty = true
+            end
         end
     elseif tab == "storage" then
         local st = self.state.storage
@@ -2529,11 +2651,18 @@ function ui:handleKey(key)
         os.queueEvent("shellcraft_quit")
         self.dirty = true
     elseif key == keys.backspace then
-        if tab == "craft" and self.state.craft.mode == "quantity" then
+        if tab == "craft" then
             local st = self.state.craft
-            st.qty = st.qty:sub(1, -2)
-            if st.qty == "" then st.qty = "1" end
-            self.dirty = true
+            if st.mode == "quantity" then
+                st.qty = st.qty:sub(1, -2)
+                if st.qty == "" then st.qty = "1" end
+                self.dirty = true
+            else
+                st.search = (st.search or ""):sub(1, -2)
+                st.scroll = 0
+                st.selected = 1
+                self.dirty = true
+            end
         elseif tab == "storage" then
             local st = self.state.storage
             if st.mode == "dank_edit" then

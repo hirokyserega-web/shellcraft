@@ -1210,11 +1210,25 @@ function ui:renderRecordFSM(yTop, yBot, w)
                 return
             end
             
+            local targetMachine = st.recordStation
+            local ptype = st.recordStation and peripheral.getType(st.recordStation)
+            local isChestType = false
+            local storageKeywords = { "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer", "cabinet", "box", "bag", "dank", "safe", "pocket" }
+            if ptype then
+                local plower = ptype:lower()
+                for _, kw in ipairs(storageKeywords) do
+                    if plower:find(kw) then isChestType = true; break end
+                end
+            end
+            if ptype and not isChestType then
+                targetMachine = ptype
+            end
+            
             local recipe = {
                 id = recId,
                 name = recName,
                 type = "station",
-                station = peripheral.getType(st.recordStation) or "any",
+                station = targetMachine or "any",
                 itemInput = st.recordConsumedItems,
                 fluidInput = st.recordConsumedFluids,
                 itemOutput = st.recordProducedItems,
@@ -1733,7 +1747,20 @@ function ui:renderLearnWizard(x, y, w, h, yBot)
             elseif wiz.step == 4 then
                 if wiz.learnType == "static" then
                     self:showToast("Reading chest...", "info")
-                    local ok, recipe = recipes:learnFromStorage(wiz.gridChest, "machine", peripheral.getType(wiz.machine))
+                    local targetMachine = wiz.machine
+                    local ptype = wiz.machine and peripheral.getType(wiz.machine)
+                    local isChestType = false
+                    local storageKeywords = { "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer", "cabinet", "box", "bag", "dank", "safe", "pocket" }
+                    if ptype then
+                        local plower = ptype:lower()
+                        for _, kw in ipairs(storageKeywords) do
+                            if plower:find(kw) then isChestType = true; break end
+                        end
+                    end
+                    if ptype and not isChestType then
+                        targetMachine = ptype
+                    end
+                    local ok, recipe = recipes:learnFromStorage(wiz.gridChest, "machine", targetMachine)
                     if ok then
                         self:showToast("Saved: " .. self.deps.lang.display(recipe.id), "success")
                         self:addLog("Static machine recipe learned: " .. recipe.id)
@@ -1852,11 +1879,25 @@ function ui:renderLearnWizard(x, y, w, h, yBot)
                     return
                 end
                 
+                local targetMachine = wiz.machine
+                local ptype = wiz.machine and peripheral.getType(wiz.machine)
+                local isChestType = false
+                local storageKeywords = { "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer", "cabinet", "box", "bag", "dank", "safe", "pocket" }
+                if ptype then
+                    local plower = ptype:lower()
+                    for _, kw in ipairs(storageKeywords) do
+                        if plower:find(kw) then isChestType = true; break end
+                    end
+                end
+                if ptype and not isChestType then
+                    targetMachine = ptype
+                end
+
                 local recipe = {
                     id = recId,
                     name = recName,
                     type = "station",
-                    station = peripheral.getType(wiz.machine) or "any",
+                    station = targetMachine or "any",
                     itemInput = wiz.consumedItems,
                     fluidInput = wiz.consumedFluids,
                     itemOutput = wiz.producedItems,

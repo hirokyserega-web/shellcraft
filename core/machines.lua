@@ -93,6 +93,38 @@ function machines:isStation(name)
         end
     end
     
+    -- 3.5. Exclude standard storage containers (chests, barrels, etc.)
+    -- unless they are explicitly configured as a machine.
+    local ptype = (peripheral.getType(name) or ""):lower()
+    local storageKeywords = {
+        "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer",
+        "cabinet", "box", "bag", "dank", "safe", "pocket"
+    }
+    local isStorageType = false
+    for _, kw in ipairs(storageKeywords) do
+        if ptype:find(kw) then
+            isStorageType = true
+            break
+        end
+    end
+    
+    if isStorageType then
+        local cfg = self.configData or (_G.config or require("config")).load()
+        local isManualMachine = false
+        if cfg then
+            if cfg.manual_roles and cfg.manual_roles[name] == "machine" then
+                isManualMachine = true
+            elseif cfg.peripherals and cfg.peripherals.machines then
+                for _, mn in ipairs(cfg.peripherals.machines) do
+                    if mn == name then isManualMachine = true; break end
+                end
+            end
+        end
+        if not isManualMachine then
+            return false
+        end
+    end
+    
     -- 4. Must have inventory or fluid capability
     local c = self:caps(name)
     return c.inventory or c.fluid
@@ -491,9 +523,10 @@ end
 
 --- Submit a processing job asynchronously.
 function machines:submit(recipe, count, onDone)
-    local machineName = self:findFree(recipe.machine)
+    local targetType = recipe.machine or recipe.station
+    local machineName = self:findFree(targetType)
     if not machineName then
-        return nil, "no free machine of type " .. tostring(recipe.machine)
+        return nil, "no free machine of type " .. tostring(targetType)
     end
     
     local jobId = "job_" .. math.floor(os.clock() * 1000) .. "_" .. math.random(1, 1000)

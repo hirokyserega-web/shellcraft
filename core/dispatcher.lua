@@ -223,8 +223,13 @@ function dispatcher:prepareIngredients(workerId, task)
     if not p then
         return false, "Turtle #"..tostring(workerId).." is not reachable. Connect the turtle to a WIRED modem and ENABLE it (right-click the modem, it must glow red)."
     end
-    -- Очистить инвентарь черепахи от старых предметов
-    self:collectResult(workerId)
+    -- Очистить инвентарь черепахи от старых предметов ТОЛЬКО если в ней что-то есть
+    do
+        local okList, list = pcall(p.list)
+        if okList and list and next(list) ~= nil then
+            self:collectResult(workerId)
+        end
+    end
 
     -- Собираем уникальные ID ингредиентов и сколько каждого нужно
     local ings = recipes.ingredientsFor(task.recipe, task.count)
@@ -244,6 +249,7 @@ function dispatcher:prepareIngredients(workerId, task)
         end
     end
 
+    local prepared = 0
     for _, ing in ipairs(ings) do
         local targetSlot = slotForId[ing.id]  -- конкретный EXTRA слот или false
         local moved
@@ -252,15 +258,16 @@ function dispatcher:prepareIngredients(workerId, task)
         else
             moved = self.storage:extract(ing.id, ing.count, turtleName, nil)
         end
-        util.info(string.format("Ingredient: moved %d/%d %s -> %s slot=%s",
-            moved, ing.count, lang.localize(ing.id), turtleName, tostring(targetSlot or "any")))
         if moved < ing.count then
             self:collectResult(workerId)
             local errMsg = string.format("Missing %d %s (moved %d/%d -> %s)",
                 ing.count - moved, lang.localize(ing.id), moved, ing.count, turtleName)
             return false, errMsg
         end
+        prepared = prepared + 1
     end
+    util.info(string.format("Prepared %d ingredient(s) for task %s -> %s",
+        prepared, tostring(task.id), turtleName), true)
     return true
 end
 
@@ -268,8 +275,12 @@ end
 function dispatcher:collectResult(workerId)
     local turtleName = self:workerName(workerId)
     if not turtleName then return 0 end
+    local p = peripheral.wrap(turtleName)
+    if not p or not p.list then return 0 end
+    local ok, list = pcall(p.list)
+    if not ok or not list then return 0 end
     local total = 0
-    for slot = 1, 16 do
+    for slot, _ in pairs(list) do  -- только реально занятые слоты
         total = total + self.storage:deposit(turtleName, slot, nil)
     end
     return total
@@ -519,6 +530,8 @@ function dispatcher:handleMessage(senderId, msg)
                 w.current_task = nil
                 w.task_started_at = nil
                 w.task_deadline = nil
+                -- Событийная побудка планировщика: дораздать задачу освободившейся черепахе сразу
+                pcall(os.queueEvent, "shellcraft_dispatch")
             end
         end
     elseif msg.type == net.MSG.HEARTBEAT then

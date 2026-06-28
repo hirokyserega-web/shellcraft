@@ -249,15 +249,31 @@ function server.run()
     end
 
     local function schedulerLoop()
+        local timeoutThreshold = (cfg.heartbeat_interval or 10) * 6
+        local iter = 0
+        local timer = os.startTimer(0.25)
         while true do
             local ok, err = pcall(function()
                 disp:tick()
-                disp:checkTimeouts((cfg.heartbeat_interval or 10) * 6)
+                iter = iter + 1
+                -- checkTimeouts не на каждый тик, чтобы не гонять таймауты слишком часто
+                if iter % 30 == 0 then
+                    disp:checkTimeouts(timeoutThreshold)
+                end
             end)
             if not ok then
                 util.err("Scheduler loop error: " .. tostring(err))
             end
-            os.sleep(0.5)
+            -- Событийная побудка: tick() срабатывает сразу как освободилась черепаха,
+            -- не дожидаясь следующего интервала. Запасной таймер ~0.25c как fallback.
+            local ev, p1 = os.pullEventRaw()
+            if ev == "timer" and p1 == timer then
+                timer = os.startTimer(0.25)
+            elseif ev == "shellcraft_dispatch" then
+                -- немедленная дораздача
+            elseif ev == "terminate" then
+                error("Terminated", 0)
+            end
         end
     end
 

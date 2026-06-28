@@ -545,6 +545,27 @@ function machines:submit(recipe, count, onDone)
     return jobId
 end
 
+local function getChunkInputs(recipe, chunk)
+    local inputs = {}
+    if recipe.itemInput then
+        for idx, ing in ipairs(recipe.itemInput) do
+            table.insert(inputs, { type = "item", id = ing.id, count = ing.count * chunk, idx = idx })
+        end
+    elseif recipe.input then
+        for idx, ing in ipairs(recipe.input) do
+            local id = type(ing) == "table" and ing.id or ing
+            local count = type(ing) == "table" and ing.count or 1
+            table.insert(inputs, { type = "item", id = id, count = count * chunk, idx = idx })
+        end
+    end
+    if recipe.fluidInput then
+        for idx, fl in ipairs(recipe.fluidInput) do
+            table.insert(inputs, { type = "fluid", id = fl.fluid, count = fl.mb * chunk, idx = idx })
+        end
+    end
+    return inputs
+end
+
 --- Tick the asynchronous FSM of active jobs.
 function machines:tick()
     for jobId, job in pairs(self.jobs) do
@@ -582,14 +603,11 @@ function machines:tick()
         maxCycles = math.max(1, maxCycles)
         
         if job.state == "feeding" then
-            local chunk = math.min(maxCycles, job.total_cycles - job.cycles_done)
-            job.current_chunk = chunk
-            local ok, err = self:feed(job.name, job.recipe, chunk)
-            if ok then
-                job.state = "processing"
-                job.started_at = os.clock()
-                local avgTime = job.recipe.avgTime or 10
-                job.deadline = os.clock() + math.max(30, chunk * avgTime * 3)
+            local chunk = job.current_chunk
+            if not chunk then
+                chunk = math.min(maxCycles, job.total_cycles - job.cycles_done)
+                job.current_chunk = chunk
+                job.fed_items = {}
                 
                 -- Capture initial storage quantities
                 job.initial_storage = {}
@@ -602,11 +620,71 @@ function machines:tick()
                         job.initial_storage[recipe.id] = self.storage:count(recipe.id)
                     end
                 end
-            else
+            end
+            
+            local chunkInputs = getChunkInputs(recipe, chunk)
+            local allFed = true
+            local missingStorageError = nil
+            
+            -- Resolve layout
+            local ptype = peripheral.getType(job.name)
+            local layout = nil
+            if ptype then
+                if machines.SLOTS[ptype] then
+                    layout = machines.SLOTS[ptype]
+                else
+                    local _, base = ptype:match("^([^:]+):(.+)$")
+                    if base and machines.SLOTS[base] then
+                        layout = machines.SLOTS[base]
+                    end
+                end
+            end
+            
+            for _, input in ipairs(chunkInputs) do
+                local fed = job.fed_items[input.id] or 0
+                local need = input.count - fed
+                if need > 0 then
+                    if input.type == "item" then
+                        local storageCount = self.storage:count(input.id)
+                        if storageCount < need then
+                            missingStorageError = "missing " .. tostring(need) .. " " .. input.id
+                            allFed = false
+                            break
+                        else
+                            local toSlot = layout and layout.input and layout.input[input.idx] or nil
+                            local n = self.storage:extract(input.id, need, job.name, toSlot)
+                            job.fed_items[input.id] = fed + n
+                            if n < need then
+                                allFed = false
+                            end
+                        end
+                    elseif input.type == "fluid" then
+                        local storageFluid = self.fluids:count(input.id)
+                        if storageFluid < need then
+                            missingStorageError = "missing " .. tostring(need) .. "mB " .. input.id
+                            allFed = false
+                            break
+                        else
+                            local n = self.fluids:extractFluid(input.id, need, job.name)
+                            job.fed_items[input.id] = fed + n
+                            if n < need then
+                                allFed = false
+                            end
+                        end
+                    end
+                end
+            end
+            
+            if missingStorageError then
                 job.state = "error"
-                emit(self, "machine_error", { name = job.name, error = err })
-                if job.onDone then job.onDone(false, err) end
+                emit(self, "machine_error", { name = job.name, error = missingStorageError })
+                if job.onDone then job.onDone(false, missingStorageError) end
                 self.jobs[jobId] = nil
+            elseif allFed then
+                job.state = "processing"
+                job.started_at = os.clock()
+                local avgTime = recipe.avgTime or 10
+                job.deadline = os.clock() + math.max(30, chunk * avgTime * 3)
             end
             
         elseif job.state == "processing" then
@@ -682,6 +760,10 @@ function machines:tick()
             
             if job.cycles_done < job.total_cycles then
                 job.state = "feeding"
+                job.current_chunk = nil
+                job.fed_items = nil
+                job.initial_storage = nil
+                job.arrived_directly_to_storage = nil
             else
                 job.state = "done"
                 emit(self, "machine_done", { name = job.name, recipe = job.recipe.id, count = job.total_moved })

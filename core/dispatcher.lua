@@ -375,68 +375,80 @@ function dispatcher:tick()
         end
     end
 
-    -- 2. Обработать крафтовые задачи черепахой (только shaped/shapeless)
-    local workerId = self:findFree()
-    if not workerId then return end
+    -- 2. Раздать крафт черепахам: всем свободным, пока есть готовые задачи
+    local triedTaskThisTick = {}  -- защита от повторного выбора той же задачи в этом тике
+    local dispatchedThisTick = 0
 
-    local readyIdx = nil
-    local task = nil
-    for j, tid in ipairs(self.queue) do
-        local t = self.tasks[tid]
-        if t and t.status == "queued" and self:isTaskReady(t) and (t.recipe.type == "shaped" or t.recipe.type == "shapeless") then
-            readyIdx = j
-            task = t
-            break
+    while true do
+        local workerId = self:findFree()
+        if not workerId then break end  -- нет свободных черепах
+
+        -- найти следующую готовую крафт-задачу, которую ещё не пробовали в этом тике
+        local readyIdx, task = nil, nil
+        for j, tid in ipairs(self.queue) do
+            local t = self.tasks[tid]
+            if t and t.status == "queued" and not triedTaskThisTick[tid]
+                and self:isTaskReady(t)
+                and (t.recipe.type == "shaped" or t.recipe.type == "shapeless") then
+                readyIdx, task = j, t
+                break
+            end
         end
-    end
-    if not task then return end
+        if not task then break end  -- готовых задач больше нет
 
-    table.remove(self.queue, readyIdx)
+        table.remove(self.queue, readyIdx)
+        triedTaskThisTick[task.id] = true
 
-    -- Avoid double craft: if requeued task's output is already in storage, skip
-    if task.attempts > 0 and task.recipe and task.recipe.id then
-        local have = self.storage:count(task.recipe.id)
-        if have >= task.count then
-            util.info("Task " .. task.id .. " already fulfilled (have " .. have .. "), marking done")
+        -- Avoid double craft: if requeued task's output is already in storage, skip
+        if task.attempts > 0 and task.recipe and task.recipe.id
+            and self.storage:count(task.recipe.id) >= task.count then
+            util.info("Task " .. task.id .. " already fulfilled (have " .. self.storage:count(task.recipe.id) .. "), marking done")
             task.status = "done"
             task.result = { success = true, count = task.count, skipped = true }
             emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = task.count })
-            return
-        end
-    end
-
-    -- Обычный крафт черепахой
-    local ok, err = self:prepareIngredients(workerId, task)
-    if not ok then
-        task.attempts = task.attempts + 1
-        if task.attempts >= self.maxAttempts then
-            task.status = "failed"
-            task.result = err
-            emit(self, "task_failed", { id = task.id, error = err })
-            self:failDependents(task.id, err)
+            -- НЕ выходим из цикла — берём следующую задачу
         else
-            table.insert(self.queue, task.id)
-            emit(self, "task_retry", { id = task.id, error = err })
+            -- Обычный крафт черепахой
+            local ok, err = self:prepareIngredients(workerId, task)
+            if not ok then
+                task.attempts = task.attempts + 1
+                if task.attempts >= self.maxAttempts then
+                    task.status = "failed"
+                    task.result = err
+                    emit(self, "task_failed", { id = task.id, error = err })
+                    self:failDependents(task.id, err)
+                else
+                    table.insert(self.queue, task.id)  -- вернуть в очередь
+                    emit(self, "task_retry", { id = task.id, error = err })
+                end
+                -- ВАЖНО: НЕ return и НЕ break — берём следующего воркера/задачу.
+            else
+                local w = self.workers[workerId]
+                w.state = "busy"
+                w.current_task = task
+                w.task_started_at = os.clock()  -- per-task deadline start (heartbeat does NOT reset this)
+                -- Dynamic deadline: based on avgTime if available, otherwise fallback
+                local crafts = math.ceil(task.count / (task.recipe.output or 1))
+                local avgTime = task.recipe.avgTime or 5
+                w.task_deadline = math.max(60, avgTime * crafts * 3)
+                task.status = "running"
+                task.worker_id = workerId
+                task.attempts = task.attempts + 1
+                net.send(workerId, net.MSG.CRAFT_REQUEST, {
+                    recipe = task.recipe,
+                    count = task.count,
+                    task_id = task.id,
+                })
+                emit(self, "task_started", { id = task.id, worker = workerId, recipe = task.recipe.id, count = task.count })
+            end
         end
-        return
+
+        -- Йилд, чтобы UI/сеть не лагали при раздаче многим воркерам за один тик
+        dispatchedThisTick = dispatchedThisTick + 1
+        if dispatchedThisTick % 4 == 0 then
+            os.sleep(0)
+        end
     end
-    local w = self.workers[workerId]
-    w.state = "busy"
-    w.current_task = task
-    w.task_started_at = os.clock()  -- per-task deadline start (heartbeat does NOT reset this)
-    -- Dynamic deadline: based on avgTime if available, otherwise fallback to self.task_timeout
-    local crafts = math.ceil(task.count / (task.recipe.output or 1))
-    local avgTime = task.recipe.avgTime or 5
-    w.task_deadline = math.max(60, avgTime * crafts * 3)
-    task.status = "running"
-    task.worker_id = workerId
-    task.attempts = task.attempts + 1
-    net.send(workerId, net.MSG.CRAFT_REQUEST, {
-        recipe = task.recipe,
-        count = task.count,
-        task_id = task.id,
-    })
-    emit(self, "task_started", { id = task.id, worker = workerId, recipe = task.recipe.id, count = task.count })
 end
 
 
@@ -663,7 +675,14 @@ function dispatcher:requestCraft(id, count, recipes)
         if node.recipe.type == "shaped" or node.recipe.type == "shapeless" then
             local out = node.recipe.output or 1
             local batch = self:batchCrafts(node.recipe)
-            batchItems = batch * out
+            -- U4: ровная балансировка больших заказов между всеми воркерами.
+            -- Ограничиваем размер батча так, чтобы число задач >= числа воркеров,
+            -- иначе большой заказ ушёл бы 1-2 огромными батчами на 1-2 черепахи.
+            local totalCrafts = math.ceil(node.count / out)
+            local workers = math.max(1, self:workerCount())
+            local perWorker = math.max(1, math.ceil(totalCrafts / workers))
+            local perTask = math.min(batch, perWorker)
+            batchItems = perTask * out
         end
 
         local tids = {}

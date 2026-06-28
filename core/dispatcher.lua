@@ -246,8 +246,8 @@ function dispatcher:prepareIngredients(workerId, task)
     -- Собираем уникальные ID ингредиентов и сколько каждого нужно
     local ings = recipes.ingredientsFor(task.recipe, task.count)
 
-    -- W3.2: пул свободных EXTRA-слотов. Каждому ингредиенту отдаём слот(ы) из
-    -- пула; при неудаче extract пробует следующий свободный EXTRA-слот.
+    -- W3.2: пул свободных EXTRA-слотов. Каждому ингредиенту перебираем слоты
+    -- пула ПО ОДНОМУ и зовём extract со СКАЛЯРНЫМ номером слота (один integer).
     -- НИКОГДА не кладём в GRID и не в nil (иначе сломаем раскладку воркера).
     local freePool = {}
     for _, s in ipairs(TURTLE_EXTRA_SLOTS) do
@@ -268,18 +268,20 @@ function dispatcher:prepareIngredients(workerId, task)
 
     local prepared = 0
     for _, ing in ipairs(ings) do
-        -- Передаём весь оставшийся пул как список допустимых слотов: extract
-        -- попробует их по порядку и положит в первый принявший (с консолидацией).
-        local slotsArg
-        if #freePool > 0 then
-            slotsArg = freePool
-        else
-            slotsArg = nil  -- слотов не осталось — пусть extract решает сам
+        local remaining = ing.count
+        -- Кладём в свободные EXTRA-слоты ПО ОДНОМУ: extract получает ОДИН
+        -- integer-слот за вызов. Если в слот влез не весь стак (лимит 64),
+        -- остаток уходит в следующий свободный EXTRA-слот.
+        syncPool()  -- актуализировать freePool по факту
+        local poolIdx = 1
+        while remaining > 0 and poolIdx <= #freePool do
+            local slot = freePool[poolIdx]               -- ОДИН номер слота
+            local got = self.storage:extract(ing.id, remaining, turtleName, slot)
+            remaining = remaining - got
+            poolIdx = poolIdx + 1
         end
 
-        local moved = self.storage:extract(ing.id, ing.count, turtleName, slotsArg)
-
-        if moved < ing.count then
+        if remaining > 0 then
             -- W3.3: различаем причину недобора и пишем ПРАВДИВУЮ ошибку.
             local have = self.storage:count(ing.id)
             if have < ing.count then
@@ -288,17 +290,21 @@ function dispatcher:prepareIngredients(workerId, task)
                     lang.localize(ing.id), ing.count, have)
             end
 
-            -- Предмет есть, но extract недобрал -> кэш протух ИЛИ слот занят.
-            -- Пересканировать предмет, освежить пустые слоты и ПОВТОРИТЬ один раз.
+            -- Предмет есть, но не лёг -> кэш протух ИЛИ слот занят.
+            -- Пересканировать, освежить пустые слоты и ПОВТОРИТЬ один раз по слотам.
             self.storage:rescanItem(ing.id)
             self.storage:refreshEmptySlots()
             syncPool()
-            local slotsRetry = (#freePool > 0) and freePool or nil
-            local moved2 = self.storage:extract(ing.id, ing.count - moved, turtleName, slotsRetry)
-            moved = moved + moved2
-            if moved < ing.count then
+            poolIdx = 1
+            while remaining > 0 and poolIdx <= #freePool do
+                local slot = freePool[poolIdx]
+                local got = self.storage:extract(ing.id, remaining, turtleName, slot)
+                remaining = remaining - got
+                poolIdx = poolIdx + 1
+            end
+            if remaining > 0 then
                 self:collectResult(workerId)
-                return false, string.format("Could not move %s into %s (turtle slot blocked or cache stale)",
+                return false, string.format("Could not move %s into %s (no free EXTRA slot / cache stale)",
                     lang.localize(ing.id), turtleName)
             end
         end
@@ -306,6 +312,18 @@ function dispatcher:prepareIngredients(workerId, task)
         -- Обновляем пул: выкинуть EXTRA-слоты, которые теперь заняты.
         syncPool()
         prepared = prepared + 1
+    end
+    -- X3: диагностика — куда фактически лёг каждый ингредиент (slot=count).
+    do
+        local parts = {}
+        for _, s in ipairs(TURTLE_EXTRA_SLOTS) do
+            local okC, c = pcall(p.getItemCount, s)
+            if okC and c and c > 0 then
+                parts[#parts + 1] = string.format("%d=%d", s, c)
+            end
+        end
+        util.debug(string.format("EXTRA slots for %s after prepare: %s",
+            turtleName, (#parts > 0 and table.concat(parts, " ") or "(empty)")), true)
     end
     util.info(string.format("Prepared %d ingredient(s) for task %s -> %s",
         prepared, tostring(task.id), turtleName), true)

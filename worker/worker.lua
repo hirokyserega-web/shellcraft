@@ -145,6 +145,19 @@ local function findSlotWith(id, fromIdx)
     return nil
 end
 
+--- X3: диагностика — фактическое содержимое EXTRA-слотов воркера (slot=id x count).
+local function dumpExtraSlots()
+    local parts = {}
+    for _, s in ipairs(EXTRA_SLOTS) do
+        local detail = turtle.getItemDetail(s)
+        if detail then
+            parts[#parts + 1] = s .. "=" .. detail.name .. "x" .. detail.count
+        end
+    end
+    if #parts == 0 then return "EXTRA slots empty" end
+    return "EXTRA slots: " .. table.concat(parts, ", ")
+end
+
 --- Разложить ингредиенты по shaped pattern (слоты 1-9).
 -- @param recipe рецепт с .pattern (3x3)
 -- @param crafts сколько крафтов
@@ -165,6 +178,7 @@ local function layoutShaped(recipe, crafts)
             while need > 0 do
                 local s, sIdx = findSlotWith(targetId, searchFromIdx)
                 if not s then
+                    util.warn("layoutShaped: " .. dumpExtraSlots())
                     return false, "ingredient not found in turtle inventory: " .. lang.localize(targetId)
                 end
                 local detail = turtle.getItemDetail(s)
@@ -200,6 +214,7 @@ local function layoutShapeless(recipe, crafts)
         while need > 0 do
             local s, sIdx = findSlotWith(ing.id, searchFromIdx)
             if not s then
+                util.warn("layoutShapeless: " .. dumpExtraSlots())
                 return false, "ingredient not found in turtle inventory: " .. lang.localize(ing.id)
             end
             local detail = turtle.getItemDetail(s)
@@ -318,7 +333,12 @@ function worker:craft(recipe, count)
         local chunk = math.min(maxChunk, remainingCrafts)
         
         -- 1. Layout chunk worth of ingredients
-        local lok, lerr = (recipe.type == "shaped") and layoutShaped(recipe, chunk) or layoutShapeless(recipe, chunk)
+        local lok, lerr
+        if recipe.type == "shaped" then
+            lok, lerr = layoutShaped(recipe, chunk)
+        else
+            lok, lerr = layoutShapeless(recipe, chunk)
+        end
         if not lok then
             self.crafting = false
             return false, lerr

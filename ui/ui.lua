@@ -1523,7 +1523,33 @@ function ui:renderLearnWizard(x, y, w, h, yBot)
         else
             widgets.text(x, contentY, "Select Machine:", colors.white, colors.black)
             
-            local machinesList = self.deps.machines and self.deps.machines.names or {}
+            local machinesList = {}
+            local added = {}
+            if self.deps.machines and self.deps.machines.names then
+                for _, name in ipairs(self.deps.machines.names) do
+                    table.insert(machinesList, name)
+                    added[name] = true
+                end
+            end
+            for _, name in ipairs(peripheral.getNames()) do
+                if not added[name] then
+                    local ok, p = pcall(peripheral.wrap, name)
+                    if ok and p and (type(p.list) == "function" or type(p.pushFluid) == "function") then
+                        local isExcluded = false
+                        if self.configData then
+                            isExcluded = (self.configData.grid_chest == name) or 
+                                         (self.configData.default_import == name) or 
+                                         (self.configData.recipe_input_chest == name)
+                        end
+                        if not isExcluded then
+                            table.insert(machinesList, name)
+                            added[name] = true
+                        end
+                    end
+                end
+            end
+            table.sort(machinesList)
+
             local rows = {}
             for idx, name in ipairs(machinesList) do
                 local isSelected = (wiz.machine == name)
@@ -1536,8 +1562,26 @@ function ui:renderLearnWizard(x, y, w, h, yBot)
             else
                 local listState = { scroll = wiz.scroll, selected = wiz.selected }
                 widgets.scrollList(self, x, contentY + 2, w, contentH - 2, rows, listState, function(idx)
-                    wiz.machine = machinesList[idx]
+                    local selectedName = machinesList[idx]
+                    wiz.machine = selectedName
                     wiz.selected = idx
+                    
+                    -- Automatically convert to machine role if it's not already a machine
+                    local currentRole = self.configData.manual_roles and self.configData.manual_roles[selectedName] or "auto"
+                    if currentRole ~= "machine" then
+                        self.configData.manual_roles = self.configData.manual_roles or {}
+                        self.configData.manual_roles[selectedName] = "machine"
+                        config.save(self.configData)
+                        self:addLog("Auto-assigned machine role to " .. selectedName)
+                        
+                        -- Rebuild networks immediately
+                        local resolved = config.resolve(self.configData)
+                        self.deps.storage.names = resolved.storage or {}
+                        self.deps.storage:scan()
+                        self.deps.fluids:resolvePool(resolved)
+                        self.deps.fluids:scan()
+                        self.deps.machines:refreshStations(resolved)
+                    end
                 end)
                 wiz.scroll = listState.scroll
                 wiz.selected = listState.selected

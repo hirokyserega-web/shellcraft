@@ -12,6 +12,7 @@ function storage.new(peripherals)
     self.names = {}      -- список имён инвентарей
     self.cache = {}      -- { [id] = { total = n, locations = {{p,s,qty},...} } }
     self.empty_slots = {} -- кэш свободных слотов для ускорения импорта/депозита
+    self.dirty = {}      -- { [id] = true } предметы, чьи locations протухли и требуют рескана
     if peripherals and peripherals.storage then
         for _, name in ipairs(peripherals.storage) do
             table.insert(self.names, name)
@@ -63,11 +64,79 @@ function storage:scan()
     end
     self.cache = map
     self.empty_slots = empty
+    self.dirty = {}
     return map
+end
+
+--- Пересобрать кэш пустых слотов по живому list() всех инвентарей.
+-- Звать при неудачах deposit/очистки, когда self.empty_slots мог протухнуть.
+function storage:refreshEmptySlots()
+    local empty = {}
+    local count = 0
+    for _, name in ipairs(self.names) do
+        count = count + 1
+        if count % 8 == 0 then
+            os.sleep(0)
+        end
+        local p = wrap(name)
+        if p and type(p.list) == "function" and type(p.size) == "function" then
+            local ok, items = pcall(p.list)
+            if ok and items then
+                local size = p.size() or 0
+                for slot = 1, size do
+                    if not items[slot] then
+                        table.insert(empty, { p = name, s = slot })
+                    end
+                end
+            end
+        end
+    end
+    self.empty_slots = empty
+    return empty
+end
+
+--- Пересканировать ОДИН предмет: пересчитать total и locations из реального
+-- list(), выкинув протухшие записи. Звать, когда extract вернул меньше, чем
+-- ожидалось, а предмет должен быть в наличии.
+function storage:rescanItem(id)
+    if not id then return 0 end
+    local total = 0
+    local locations = {}
+    local count = 0
+    for _, name in ipairs(self.names) do
+        count = count + 1
+        if count % 8 == 0 then
+            os.sleep(0)
+        end
+        local p = wrap(name)
+        if p and type(p.list) == "function" then
+            local ok, items = pcall(p.list)
+            if ok and items then
+                for slot, info in pairs(items) do
+                    if info and info.name == id then
+                        local qty = info.count or 0
+                        total = total + qty
+                        table.insert(locations, { p = name, s = slot, qty = qty })
+                    end
+                end
+            end
+        end
+    end
+    if total > 0 then
+        self.cache[id] = { total = total, locations = locations }
+    else
+        self.cache[id] = nil
+    end
+    if self.dirty then self.dirty[id] = nil end
+    return total
 end
 
 --- Сколько всего предмета id в хранилище.
 function storage:count(id)
+    -- Если предмет помечен как протухший — пересканировать прежде чем ответить.
+    if self.dirty and self.dirty[id] then
+        return self:rescanItem(id)
+    end
     if self.cache[id] then return self.cache[id].total end
     -- fallback: быстрый пересчёт
     local total = 0
@@ -99,44 +168,70 @@ end
 -- @param id ID предмета
 -- @param count сколько
 -- @param targetPeripheral имя целевого инвентаря (куда класть)
--- @param targetSlot слот назначения (опц.)
+-- @param targetSlot слот назначения (опц.). Может быть числом ИЛИ массивом
+--        допустимых EXTRA-слотов — extract попробует каждый по порядку.
 -- @return сколько реально перемещено
 function storage:extract(id, count, targetPeripheral, targetSlot)
     local info = self.cache[id]
     if not info or info.total <= 0 then return 0 end
+
+    -- Нормализуем целевые слоты в список. false-сентинел = "любой слот"
+    -- ({ nil } в Lua имеет длину 0 и не итерировался бы).
+    local slots
+    if type(targetSlot) == "table" then
+        slots = {}
+        for _, s in ipairs(targetSlot) do slots[#slots + 1] = s end
+        if #slots == 0 then slots = { false } end
+    elseif targetSlot ~= nil then
+        slots = { targetSlot }
+    else
+        slots = { false }  -- единственный проход: положить в любой подходящий слот
+    end
+
     local remaining = count
     local moved = 0
+    local removedStale = false
     local i = 1
     while i <= #info.locations do
         if remaining <= 0 then break end
         local loc = info.locations[i]
         local p = wrap(loc.p)
-        if p then
+        if not p then
+            -- Локация недоступна (периферия пропала) — считаем её протухшей.
+            table.remove(info.locations, i)
+            removedStale = true
+        else
             local toMove = math.min(remaining, loc.qty)
             local ok, n = false, 0
-            if p.pushItems then
-                if targetSlot then
-                    ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, targetSlot)
-                else
-                    ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove)
-                end
-            end
-            if not ok or not n or n == 0 then
-                -- Fallback: pull from target peripheral
-                local target = wrap(targetPeripheral)
-                if target and target.pullItems then
-                    if targetSlot then
-                        ok, n = pcall(target.pullItems, loc.p, loc.s, toMove, targetSlot)
+            -- Пробуем по очереди каждый допустимый целевой слот, пока что-то не уйдёт.
+            for si = 1, #slots do
+                local dst = slots[si]
+                ok, n = false, 0
+                if p.pushItems then
+                    if dst then
+                        ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, dst)
                     else
-                        ok, n = pcall(target.pullItems, loc.p, loc.s, toMove)
+                        ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove)
                     end
                 end
+                if not ok or not n or n == 0 then
+                    -- Fallback: тянем целевым инвентарём из нашей локации.
+                    local target = wrap(targetPeripheral)
+                    if target and target.pullItems then
+                        if dst then
+                            ok, n = pcall(target.pullItems, loc.p, loc.s, toMove, dst)
+                        else
+                            ok, n = pcall(target.pullItems, loc.p, loc.s, toMove)
+                        end
+                    end
+                end
+                if ok and n and n > 0 then break end
             end
             if ok and n and n > 0 then
                 moved = moved + n
                 remaining = remaining - n
                 loc.qty = loc.qty - n
-                if loc.qty == 0 then
+                if loc.qty <= 0 then
                     if self.empty_slots then
                         table.insert(self.empty_slots, { p = loc.p, s = loc.s })
                     end
@@ -145,13 +240,22 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
                     i = i + 1
                 end
             else
-                i = i + 1
+                -- Ни один слот не принял из этой локации: либо запись протухла,
+                -- либо ВСЕ целевые слоты заняты. Чтобы битые записи не копились,
+                -- удаляем локацию из кэша (НЕ делаем i=i+1 — мы сдвинулись).
+                table.remove(info.locations, i)
+                removedStale = true
             end
-        else
-            i = i + 1
         end
     end
     if info then info.total = (info.total or 0) - moved end
+
+    -- Недобор при наличии запаса ИЛИ выкинуты протухшие локации — пометить для
+    -- рескана, чтобы кэшированный total самоисправился при следующем count().
+    if moved < count or removedStale then
+        self.dirty = self.dirty or {}
+        self.dirty[id] = true
+    end
     return moved
 end
 
@@ -230,7 +334,8 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
         end
 
         -- 2. If there are still items left to move, find empty slots using cached self.empty_slots
-        if toMove > 0 and self.empty_slots then
+        local function fillEmptySlots()
+            if not (toMove > 0 and self.empty_slots) then return end
             local i = 1
             while i <= #self.empty_slots and toMove > 0 do
                 local slotInfo = self.empty_slots[i]
@@ -249,13 +354,13 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
                         if ok2 and n and n > 0 then
                             moved = moved + n
                             toMove = toMove - n
-                            
+
                             -- Update cache
                             if not self.cache[id] then
                                 self.cache[id] = { total = 0, locations = {} }
                             end
                             table.insert(self.cache[id].locations, { p = slotInfo.p, s = slotInfo.s, qty = n })
-                            
+
                             -- Since we put items in this slot, it's no longer empty. Remove it from empty_slots.
                             table.remove(self.empty_slots, i)
                         else
@@ -268,6 +373,16 @@ function storage:deposit(sourcePeripheral, sourceSlot, count)
                     i = i + 1
                 end
             end
+        end
+
+        fillEmptySlots()
+
+        -- W4: ни стаки (path 1), ни пустые слоты (path 2) ничего не приняли, но
+        -- предмет валиден и ещё есть остаток -> кэш пустых слотов мог протухнуть.
+        -- Освежаем его ОДИН раз и повторяем, иначе остаток залипнет в источнике.
+        if moved == 0 and toMove > 0 then
+            self:refreshEmptySlots()
+            fillEmptySlots()
         end
 
         -- 3. Update the total cache count

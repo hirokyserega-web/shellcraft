@@ -223,47 +223,88 @@ function dispatcher:prepareIngredients(workerId, task)
     if not p then
         return false, "Turtle #"..tostring(workerId).." is not reachable. Connect the turtle to a WIRED modem and ENABLE it (right-click the modem, it must glow red)."
     end
-    -- Очистить инвентарь черепахи от старых предметов ТОЛЬКО если в ней что-то есть
-    do
-        local okList, list = pcall(p.list)
-        if okList and list and next(list) ~= nil then
+
+    -- W3.1: ВСЕГДА убедиться, что черепаха чистая и EXTRA-слоты пусты.
+    -- Не полагаемся только на условную очистку: если deposit не смог всё
+    -- выгрузить, освежаем пустые слоты хранилища и повторяем.
+    local function turtleHasItems()
+        local okL, list = pcall(p.list)
+        return okL and list and next(list) ~= nil
+    end
+    if turtleHasItems() then
+        self:collectResult(workerId)
+        if turtleHasItems() then
+            -- deposit не смог всё выгрузить -> освежить пустые слоты и повторить
+            self.storage:refreshEmptySlots()
             self:collectResult(workerId)
+            if turtleHasItems() then
+                return false, "Could not clear turtle (storage full?) before crafting"
+            end
         end
     end
 
     -- Собираем уникальные ID ингредиентов и сколько каждого нужно
     local ings = recipes.ingredientsFor(task.recipe, task.count)
 
-    -- Назначаем каждому уникальному ингредиенту EXTRA_SLOT, чтобы не попасть в GRID
-    local slotForId = {}
-    local slotIdx = 1
-    for _, ing in ipairs(ings) do
-        if not slotForId[ing.id] then
-            if slotIdx > #TURTLE_EXTRA_SLOTS then
-                -- Больше уникальных ингредиентов чем свободных слотов — разрешаем без указания слота
-                slotForId[ing.id] = false
-            else
-                slotForId[ing.id] = TURTLE_EXTRA_SLOTS[slotIdx]
-                slotIdx = slotIdx + 1
-            end
+    -- W3.2: пул свободных EXTRA-слотов. Каждому ингредиенту отдаём слот(ы) из
+    -- пула; при неудаче extract пробует следующий свободный EXTRA-слот.
+    -- НИКОГДА не кладём в GRID и не в nil (иначе сломаем раскладку воркера).
+    local freePool = {}
+    for _, s in ipairs(TURTLE_EXTRA_SLOTS) do
+        freePool[#freePool + 1] = s
+    end
+
+    -- Зафиксировать реально занятые EXTRA-слоты черепахи и убрать их из пула.
+    local function syncPool()
+        local kept = {}
+        for _, s in ipairs(freePool) do
+            local cnt = 0
+            local okC, c = pcall(p.getItemCount, s)
+            if okC and c then cnt = c end
+            if cnt == 0 then kept[#kept + 1] = s end
         end
+        freePool = kept
     end
 
     local prepared = 0
     for _, ing in ipairs(ings) do
-        local targetSlot = slotForId[ing.id]  -- конкретный EXTRA слот или false
-        local moved
-        if targetSlot then
-            moved = self.storage:extract(ing.id, ing.count, turtleName, targetSlot)
+        -- Передаём весь оставшийся пул как список допустимых слотов: extract
+        -- попробует их по порядку и положит в первый принявший (с консолидацией).
+        local slotsArg
+        if #freePool > 0 then
+            slotsArg = freePool
         else
-            moved = self.storage:extract(ing.id, ing.count, turtleName, nil)
+            slotsArg = nil  -- слотов не осталось — пусть extract решает сам
         end
+
+        local moved = self.storage:extract(ing.id, ing.count, turtleName, slotsArg)
+
         if moved < ing.count then
-            self:collectResult(workerId)
-            local errMsg = string.format("Missing %d %s (moved %d/%d -> %s)",
-                ing.count - moved, lang.localize(ing.id), moved, ing.count, turtleName)
-            return false, errMsg
+            -- W3.3: различаем причину недобора и пишем ПРАВДИВУЮ ошибку.
+            local have = self.storage:count(ing.id)
+            if have < ing.count then
+                self:collectResult(workerId)
+                return false, string.format("Not enough %s: need %d, have %d",
+                    lang.localize(ing.id), ing.count, have)
+            end
+
+            -- Предмет есть, но extract недобрал -> кэш протух ИЛИ слот занят.
+            -- Пересканировать предмет, освежить пустые слоты и ПОВТОРИТЬ один раз.
+            self.storage:rescanItem(ing.id)
+            self.storage:refreshEmptySlots()
+            syncPool()
+            local slotsRetry = (#freePool > 0) and freePool or nil
+            local moved2 = self.storage:extract(ing.id, ing.count - moved, turtleName, slotsRetry)
+            moved = moved + moved2
+            if moved < ing.count then
+                self:collectResult(workerId)
+                return false, string.format("Could not move %s into %s (turtle slot blocked or cache stale)",
+                    lang.localize(ing.id), turtleName)
+            end
         end
+
+        -- Обновляем пул: выкинуть EXTRA-слоты, которые теперь заняты.
+        syncPool()
         prepared = prepared + 1
     end
     util.info(string.format("Prepared %d ingredient(s) for task %s -> %s",

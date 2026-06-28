@@ -590,6 +590,18 @@ function machines:tick()
                 job.started_at = os.clock()
                 local avgTime = job.recipe.avgTime or 10
                 job.deadline = os.clock() + math.max(30, chunk * avgTime * 3)
+                
+                -- Capture initial storage quantities
+                job.initial_storage = {}
+                if self.storage then
+                    if recipe.itemOutput then
+                        for _, out in ipairs(recipe.itemOutput) do
+                            job.initial_storage[out.id] = self.storage:count(out.id)
+                        end
+                    elseif recipe.id then
+                        job.initial_storage[recipe.id] = self.storage:count(recipe.id)
+                    end
+                end
             else
                 job.state = "error"
                 emit(self, "machine_error", { name = job.name, error = err })
@@ -599,6 +611,37 @@ function machines:tick()
             
         elseif job.state == "processing" then
             local isReady, err = self:ready(job.name, job.recipe, job.current_chunk)
+            
+            -- ALSO check if the expected output items have already arrived in the storage!
+            if not isReady and not err and self.storage then
+                local allArrived = true
+                if recipe.itemOutput then
+                    for _, out in ipairs(recipe.itemOutput) do
+                        local targetCount = out.count * job.current_chunk
+                        local initialCount = job.initial_storage and job.initial_storage[out.id] or 0
+                        local currentCount = self.storage:count(out.id)
+                        if currentCount < initialCount + targetCount then
+                            allArrived = false
+                            break
+                        end
+                    end
+                elseif recipe.id then
+                    local targetCount = (recipe.output or 1) * job.current_chunk
+                    local initialCount = job.initial_storage and job.initial_storage[recipe.id] or 0
+                    local currentCount = self.storage:count(recipe.id)
+                    if currentCount < initialCount + targetCount then
+                        allArrived = false
+                    end
+                else
+                    allArrived = false
+                end
+                
+                if allArrived then
+                    isReady = true
+                    job.arrived_directly_to_storage = true
+                end
+            end
+
             if err then
                 job.state = "error"
                 emit(self, "machine_error", { name = job.name, error = err })
@@ -616,6 +659,21 @@ function machines:tick()
             
         elseif job.state == "collecting" then
             local moved = self:collect(job.name, job.recipe)
+            
+            -- If items arrived directly to storage (external pipe/hopper/importer),
+            -- we count the expected yield as successfully moved.
+            if job.arrived_directly_to_storage then
+                local expected = 0
+                if recipe.itemOutput then
+                    for _, out in ipairs(recipe.itemOutput) do
+                        expected = expected + (out.count or 1) * job.current_chunk
+                    end
+                else
+                    expected = (recipe.output or 1) * job.current_chunk
+                end
+                moved = expected
+            end
+
             local elapsed = os.clock() - job.started_at
             if elapsed < 0 then elapsed = 0 end
             

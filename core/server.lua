@@ -39,6 +39,9 @@ function server.run()
     disp.recipes = rec
     if cfg.task_timeout then disp.task_timeout = cfg.task_timeout end
     if cfg.heartbeat_grace then disp.heartbeat_grace = cfg.heartbeat_grace end
+    disp:load()
+    disp.transport_mode = cfg.transfer_mode or disp.transport_mode or "buffer"
+    disp:save()
 
     -- 4. Связь событий -> UI + лог + прогресс
     local uiInstance = nil
@@ -199,6 +202,7 @@ function server.run()
     local found = net.discoverWorkers(3)
     for wid, info in pairs(found) do
         disp:addWorker(wid, info)
+        disp:save()
         uiInstance:addLog("Found worker #" .. wid)
     end
     if next(found) == nil then
@@ -224,6 +228,7 @@ function server.run()
             uiInstance:buildTabs()
             uiInstance.dirty = true
         end
+        disp:save()
     end
 
     -- 7. Корутины

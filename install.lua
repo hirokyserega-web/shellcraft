@@ -22,7 +22,7 @@ local FILES = {
     "core/planner.lua", "core/machines.lua", "core/dispatcher.lua",
     "core/fluids.lua",
     "worker/worker.lua", "ui/ui.lua", "ui/widgets.lua",
-    "lang/ru.lua", "lib/net.lua", "lib/util.lua",
+    "lang/ru.lua", "lang/errors.lua", "lib/net.lua", "lib/itemmatch.lua", "lib/util.lua",
     "lib/names.lua", "tools/gen_lang.lua",
 }
 

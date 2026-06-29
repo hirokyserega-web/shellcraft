@@ -299,3 +299,49 @@ full system test on CraftOS-PC or a real CC:T setup:
    NBT consumed matches, not a same-name different-NBT item.
 
 When all 10 acceptance criteria pass and the TODO list is empty, merge.
+
+
+## Final status (this branch)
+
+What survived and works:
+
+- `lib/itemmatch.lua` — done.
+- `lib/net.lua` — done; envelope with `v`/`msg_id` and `WORKER_HELLO` for back-compat.
+- `config.lua` — done; `transfer_mode` defaults to `"buffer"`.
+- `core/storage.lua` — done. Spec-aware `extract` (NBT filter on locations),
+  per-id reservations, `reservationSnapshot()`/`restoreReservations()` for persistence.
+- `core/recipes.lua` — done. `cells()` / `resolveConcrete()` guard against 2-row
+  patterns (skip nil rows/cols).
+- `core/planner.lua` — done. `storage:available()` honors reservations.
+- `core/dispatcher.lua` — done. New: `reserveForTaskTree` (atomic per order),
+  per-task `_resById` + order `reservation_key`, `consumeReserved`, `releaseOrderIfDone`,
+  `resolveTaskConcrete` (tag/variant/NBT → concrete id), `stageBuffer`/`stageWired`,
+  `taskAlreadySatisfied` short-circuit, `cancelTask` → `CRAFT_CANCEL`,
+  `serialize`/`load` round-trip with reservation restore, fixed-mode handoff
+  (`task.transfer_mode`/`w.transfer_mode`).
+- `worker/worker.lua` — restored. Buffer-FSM with `pullFromInput` (suck + wired
+  fallback), `pushToOutput`, `chunkLoop` (with NBT-aware `verifyGridMatches`),
+  `craftBuffer`/`craftWired`, `storage_full` retry-with-backoff loop, periodic
+  `maybeBeat` heartbeat inside long loops, `maybeRefuel`, `CANCEL` honoured via
+  `self.cancelled`, HELLO/DISCOVER/CRAFT_REQUEST/CRAFT_ACK/STATUS/RESULT/PING/PONG.
+- `core/server.lua` — `disp:load()` + `disp.transport_mode` hydration from cfg
+  + `disp:save()` after event mutations.
+- `startup.lua` — `lang.localize` now falls back to `lang/errors.lua` strings.
+- `lang/errors.lua` — new. Human-readable `worker_must_have_buffer`, `storage_full`,
+  `ack_timeout`, `tag_unresolved`, etc.
+- `install.lua` — `lib/itemmatch.lua` and `lang/errors.lua` added to FILES.
+
+## Deviations from architecture plan
+
+- `releaseTaskReservations` no longer drops the whole order-key on single-task
+  failure; only the **last** task in an order frees it (via `releaseOrderIfDone`).
+  This keeps parallel batches of the same order alive when one sub-task fails.
+- `transfer_mode` is locked on `task` and `w` at dispatch time, so config
+  changes mid-flight cannot desync a task from its worker.
+- `consumeReservation` uses per-id `consumeReservation(rid, used)` where `used`
+  is computed from `concrete_recipe.ingredientsFor(task.count)`.
+
+## Test entry-point
+
+Run `luac5.1 -p` on every file — all pass. Manual harness under
+`/tmp/test_*.lua` for end-to-end runs on CraftOS-PC.

@@ -1362,6 +1362,89 @@ function dispatcher:tick()
     end
 
     local ready = self:_readyQueue()
+    -- Machine tasks handling
+    local mIdx = 1
+    while mIdx <= #ready do
+        local task = ready[mIdx]
+        local isMachine = task.recipe and (task.recipe.type == "machine" or task.recipe.type == "station")
+        if isMachine then
+            table.remove(ready, mIdx)
+            removeValue(self.queue, task.id)
+            
+            local jobId, err = self.machines:submit(task.recipe, task.count, function(success, result, elapsed, total_cycles)
+                if success then
+                    task.status = "done"
+                    task.result = { success = true, count = result, elapsed = elapsed, crafts = total_cycles }
+                    task.updated_at = now()
+                    self:consumeReserved(task)
+                    self:releaseOrderIfDone(task)
+                    emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = result, worker = "machine" })
+                else
+                    task.status = "failed"
+                    task.result = { success = false, error = result }
+                    self:releaseOrderIfDone(task)
+                    emit(self, "task_failed", { id = task.id, error = result })
+                    self:failDependents(task.id, result)
+                end
+                self:save()
+            end)
+            
+            if not jobId then
+                task.status = "queued"
+                self.queue[#self.queue + 1] = task.id
+                emit(self, "task_retry", { id = task.id, error = err or "no_machine" })
+            else
+                task.status = "running"
+                task.worker_id = "machine"
+                task.updated_at = now()
+            end
+        else
+            mIdx = mIdx + 1
+        end
+    end
+
+    -- Machine tasks handling
+    local mIdx = 1
+    while mIdx <= #ready do
+        local task = ready[mIdx]
+        local isMachine = task.recipe and (task.recipe.type == "machine" or task.recipe.type == "station")
+        if isMachine then
+            table.remove(ready, mIdx)
+            removeValue(self.queue, task.id)
+            
+            local jobId, err = self.machines:submit(task.recipe, task.count, function(success, result, elapsed, total_cycles)
+                if success then
+                    task.status = "done"
+                    task.result = { success = true, count = result, elapsed = elapsed, crafts = total_cycles }
+                    task.updated_at = now()
+                    self:consumeReserved(task)
+                    self:releaseOrderIfDone(task)
+                    emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = result, worker = "machine" })
+                else
+                    task.status = "failed"
+                    task.result = { success = false, error = result }
+                    self:releaseOrderIfDone(task)
+                    emit(self, "task_failed", { id = task.id, error = result })
+                    self:failDependents(task.id, result)
+                end
+                self:save()
+            end)
+            
+            if not jobId then
+                -- No machine free, requeue for next tick
+                task.status = "queued"
+                self.queue[#self.queue + 1] = task.id
+                emit(self, "task_retry", { id = task.id, error = err or "no_machine" })
+            else
+                task.status = "running"
+                task.worker_id = "machine"
+                task.updated_at = now()
+            end
+        else
+            mIdx = mIdx + 1
+        end
+    end
+
     if #ready == 0 then
         self:save()
         return

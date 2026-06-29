@@ -46,24 +46,26 @@ end
 function storage:scan()
     local map = {}
     local empty = {}
-    local count = 0
+    local iter = 0
     for _, name in ipairs(self.names) do
-        count = count + 1
-        if count % 8 == 0 then os.sleep(0) end
+        iter = iter + 1
+        if iter % 4 == 0 then os.sleep(0) end
         local p = wrap(name)
         if p and type(p.list) == "function" and type(p.size) == "function" then
             local ok, items = pcall(p.list)
             if ok and items then
                 local size = p.size() or 0
-                for slot = 1, size do
-                    local info = items[slot]
+                for slot, info in pairs(items) do
                     if info and info.name then
                         local id = info.name
                         local qty = info.count or 0
                         if not map[id] then map[id] = { total = 0, locations = {} } end
                         map[id].total = map[id].total + qty
                         map[id].locations[#map[id].locations + 1] = { p = name, s = slot, qty = qty }
-                    elseif not info then
+                    end
+                end
+                for slot = 1, size do
+                    if not items[slot] then
                         empty[#empty + 1] = { p = name, s = slot }
                     end
                 end
@@ -73,7 +75,7 @@ function storage:scan()
     self.cache = map
     self.empty_slots = empty
     self.dirty = {}
-    self._detailCache = {}
+    self:clearDetailCache()
     return map
 end
 

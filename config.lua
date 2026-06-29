@@ -134,7 +134,7 @@ local function isMachine(name)
 
     local storageKeywords = {
         "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer",
-        "cabinet", "box", "bag", "dank", "safe", "pocket"
+        "cabinet", "box", "bag", "dank", "safe", "pocket", "backpack", "tank", "drum"
     }
     for _, kw in ipairs(storageKeywords) do
         if ptype:find(kw) then
@@ -161,7 +161,7 @@ local function isStorage(name)
     local ptype = (peripheral.getType(name) or ""):lower()
     local storageKeywords = {
         "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer",
-        "cabinet", "box", "bag", "dank", "safe", "pocket"
+        "cabinet", "box", "bag", "dank", "safe", "pocket", "backpack", "tank", "drum"
     }
     for _, kw in ipairs(storageKeywords) do
         if ptype:find(kw) then return true end

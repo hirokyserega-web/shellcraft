@@ -200,9 +200,9 @@ function dispatcher:serialize()
             attempts = task.attempts,
             step = task.step,
             progress = task.progress,
-            result = task.result,
-            dependencies = task.dependencies,
-            dependents = task.dependents,
+            result = util.deepCopy(task.result),
+            dependencies = util.deepCopy(task.dependencies),
+            dependents = util.deepCopy(task.dependents),
             worker_id = task.worker_id,
             batch_index = task.batch_index,
             batch_total = task.batch_total,
@@ -228,7 +228,7 @@ function dispatcher:serialize()
             state = w.state,
             current_task_id = w.current_task and w.current_task.id or nil,
             last_seen = w.last_seen,
-            buffer = w.buffer,
+            buffer = util.deepCopy(w.buffer),
             turtle_name = w.turtle_name,
             busy = w.busy,
             ready = w.ready,
@@ -249,7 +249,7 @@ function dispatcher:serialize()
         tasks = tasks,
         queue = queue,
         workers = workers,
-        reservations = self.storage and self.storage:reservationSnapshot() or {},
+        reservations = self.storage and util.deepCopy(self.storage:reservationSnapshot()) or {},
     }
 end
 
@@ -1323,7 +1323,7 @@ function dispatcher:_ackRetryLoop()
                         count = task.count,
                         crafts = task.crafts,
                         transfer_mode = task.transfer_mode or cfg.transfer_mode or "buffer",
-                        buffer = w.buffer,
+                        buffer = util.deepCopy(w.buffer),
                         retry = true,
                     })
                 end

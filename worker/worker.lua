@@ -234,9 +234,15 @@ local function pullFromInput(self, need, spec, buffer)
         if adj then
             local dst = extraSlotFor(id) or findEmptyExtra()
             if not dst then return false, "no free EXTRA slot to receive input" end
+            local space = itemSpace(dst)
+            local toSuck = math.min(need - have, space)
+            if toSuck <= 0 then return false, "EXTRA slot full" end
+
             turtle.select(dst)
-            local ok, moved = pcall(suckBySide, inputSide, need - have)
-            moved = (ok and moved) or 0
+            local before = itemCount(dst)
+            local ok, done = pcall(suckBySide, inputSide, toSuck)
+            local moved = itemCount(dst) - before
+
             if moved > 0 then
                 -- Проверяем что засосали нужный предмет (id + NBT).
                 local d = itemDetail(dst)
@@ -247,7 +253,7 @@ local function pullFromInput(self, need, spec, buffer)
                     pcall(dropBySide, buffer and buffer.output_side or "bottom", moved)
                 end
             else
-                os.sleep(0)  -- в сундуке пока нет нужного — уступаем цикл
+                os.sleep(0.05)  -- в сундуке пока нет нужного — уступаем цикл
             end
         elseif inputName and selfName() then
             -- 2) Fallback: проводной модем есть — тянем из входного сундука по имени.
@@ -626,6 +632,7 @@ function worker:craftBuffer(recipe, count, buffer)
         local spec = ing.spec or { id = ing.id }
         local okS, errS = pullFromInput(self, ing.count, spec, buffer)
         if not okS then
+            pcall(evacuateToOutput, self, buffer)
             return false, errS
         end
     end

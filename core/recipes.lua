@@ -427,12 +427,10 @@ function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
             local idx = row * 3 + col
             local s = slots[idx]
             if s and s.id then
-                -- Для shaped-крафта в MC всегда потребляется 1 предмет на слот.
-                -- Игнорируем стаки при обучении, чтобы не ломать логику воркера.
                 r[col] = { id = s.id, count = 1 }
             end
         end
-        pattern[#pattern + 1] = r
+        pattern[row + 1] = r
     end
     return {
         id = resultId,

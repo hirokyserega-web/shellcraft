@@ -405,7 +405,10 @@ local function layoutShaped(recipe, crafts, buffer, self)
         local cell = prow and prow[col]
         if cell then
             local id = cell.id or cell.name
-            local need = (cell.count or 1) * crafts
+            -- Shaped recipes always use 1 item per slot per craft cycle.
+            local need = crafts
+            local fromIdx = 1
+            local gridSlot = GRID[i]
             local fromIdx = 1
             local gridSlot = GRID[i]
             while need > 0 do

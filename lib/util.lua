@@ -88,17 +88,17 @@ end
 --- Сохранение данных.
 function util.saveData(path, data)
     util.ensureDir(fs.getDir(path))
-    -- identity-breaking deep copy to guarantee NO shared references for textutils.serialize
-    local safeData = util.deepCopy(data)
-    
-    local ok, res = pcall(textutils.serialize, safeData, { compact = false, allow_repeated = true })
+    -- CC:T 1.100+ support options table as 2nd arg. allow_repeated=true prevents failure on shared refs.
+    local ok, res = pcall(textutils.serialize, data, { compact = false, allow_repeated = true })
     local content = res
-    if not ok then
+    if not ok or type(content) ~= "string" then
+        -- Fallback: identity-breaking deep copy to guarantee NO shared references
+        local safeData = util.deepCopy(data)
         ok, res = pcall(textutils.serialize, safeData)
         content = res
     end
     
-    if not ok or not content then
+    if not ok or type(content) ~= "string" then
         return false, "Serialization failed: " .. tostring(content)
     end
 

@@ -202,6 +202,23 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
             removedStale = true
         else
             local toMove = math.min(remaining, loc.qty)
+            -- Z2: проверяем, что локация ФИЗИЧЕСКИ держит нужный предмет. Кэш мог
+            -- протухнуть (в слоте уже другой предмет) — тогда push утащил бы чужое
+            -- и засчитал его как наш. Сверяем id до переноса.
+            local realId, realQty = nil, 0
+            if p.getItemDetail then
+                local okD, det = pcall(p.getItemDetail, loc.s)
+                if okD and det then realId, realQty = det.name, det.count or 0 end
+            elseif p.list then
+                local okLs, ls = pcall(p.list)
+                if okLs and ls and ls[loc.s] then realId, realQty = ls[loc.s].name, ls[loc.s].count or 0 end
+            end
+            if realId ~= nil and realId ~= id then
+                -- Слот держит ДРУГОЙ предмет -> запись протухла, выкинуть и не трогать.
+                table.remove(info.locations, i)
+                removedStale = true
+            else
+            if realId == id and realQty < toMove then toMove = realQty end
             local ok, n = false, 0
             -- Пробуем по очереди каждый допустимый целевой слот, пока что-то не уйдёт.
             for si = 1, #slots do
@@ -245,6 +262,7 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
                 -- удаляем локацию из кэша (НЕ делаем i=i+1 — мы сдвинулись).
                 table.remove(info.locations, i)
                 removedStale = true
+            end
             end
         end
     end

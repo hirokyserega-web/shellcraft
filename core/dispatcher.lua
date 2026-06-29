@@ -318,6 +318,39 @@ function dispatcher:prepareIngredients(workerId, task)
         syncPool()
         prepared = prepared + 1
     end
+
+    -- Z1: ФИЗИЧЕСКАЯ проверка раскладки. extract мог декрементировать счётчик,
+    -- но предмет физически НЕ попал в черепаху (чужой слот, баг учёта, частичный
+    -- перенос). Никогда не отправляем крафт с недокомплектом: считаем реальное
+    -- содержимое инвентаря черепахи и сверяем с потребностью.
+    do
+        local present = {}
+        local okL, list = pcall(p.list)
+        if okL and list then
+            for _, item in pairs(list) do
+                if item and item.name then
+                    present[item.name] = (present[item.name] or 0) + (item.count or 0)
+                end
+            end
+        end
+        for _, ing in ipairs(ings) do
+            local have = present[ing.id] or 0
+            if have < ing.count then
+                -- Чего-то не доехало физически -> полностью очистить черепаху
+                -- (вернуть в хранилище уже доехавшие ингредиенты) и честно упасть.
+                self:collectResult(workerId)
+                local okL2, list2 = pcall(p.list)
+                if okL2 and list2 and next(list2) ~= nil then
+                    self.storage:refreshEmptySlots()
+                    self:collectResult(workerId)
+                end
+                return false, string.format(
+                    "Ingredient layout incomplete: %s need %d, only %d reached turtle (task aborted, turtle cleared)",
+                    lang.localize(ing.id), ing.count, have)
+            end
+        end
+    end
+
     -- X3: диагностика — куда фактически лёг каждый ингредиент (slot=count).
     do
         local parts = {}

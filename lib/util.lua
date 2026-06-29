@@ -111,19 +111,9 @@ function util.saveData(path, data)
     f.close()
     return true
 end
-    
-    if not ok or type(content) ~= "string" then
-        return false, "Serialization failed: " .. tostring(content)
-    end
-
-    local f = fs.open(path, "w")
-    if not f then return false, "Cannot open file for writing: " .. path end
-    f.write(content)
-    f.close()
     return true
 end
 
---- Глубокое копирование таблицы.
 function util.deepCopy(obj)
     if type(obj) ~= "table" then return obj end
     local copy = {}

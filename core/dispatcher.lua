@@ -194,7 +194,7 @@ function dispatcher:serialize()
     for id, task in pairs(self.tasks) do
         tasks[id] = {
             id = task.id,
-            recipe = task.recipe,
+            recipe = util.deepCopy(task.recipe),
             count = task.count,
             status = task.status,
             attempts = task.attempts,
@@ -207,7 +207,7 @@ function dispatcher:serialize()
             batch_index = task.batch_index,
             batch_total = task.batch_total,
             reservation_id = task.reservation_id,
-            plan = task.plan,
+            plan = util.deepCopy(task.plan),
             task_type = task.task_type,
             created_at = task.created_at,
             updated_at = task.updated_at,
@@ -216,9 +216,9 @@ function dispatcher:serialize()
             requested_root = task.requested_root,
             source_id = task.source_id,
             transfer_mode = task.transfer_mode,
-            concrete_recipe = task.concrete_recipe,
+            concrete_recipe = util.deepCopy(task.concrete_recipe),
             reservation_key = task.reservation_key,
-            _resById = task._resById,
+            _resById = util.deepCopy(task._resById),
         }
     end
     local workers = {}
@@ -1319,7 +1319,7 @@ function dispatcher:_ackRetryLoop()
                     task.ack_deadline = now() + timeout
                     net.send(workerId, net.MSG.CRAFT_REQUEST, {
                         task_id = task.id,
-                        recipe = task.recipe,
+                        recipe = util.deepCopy(task.recipe),
                         count = task.count,
                         crafts = task.crafts,
                         transfer_mode = task.transfer_mode or cfg.transfer_mode or "buffer",

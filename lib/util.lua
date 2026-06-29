@@ -90,7 +90,13 @@ function util.saveData(path, data)
     util.ensureDir(fs.getDir(path))
     local f = fs.open(path, "w")
     if not f then return false, "Не удалось открыть " .. path end
-    f.write(textutils.serialize(data))
+    -- Try modern serialize with repeated entries support
+    local ok, content = pcall(textutils.serialize, data, { compact = false, allow_repeated = true })
+    if not ok then
+        -- Fallback for older versions
+        content = textutils.serialize(data)
+    end
+    f.write(content)
     f.close()
     return true
 end

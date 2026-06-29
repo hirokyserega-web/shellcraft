@@ -228,6 +228,23 @@ function storage:reservationSummary()
     return out
 end
 
+--- Снимок таблицы резерваций для персиста (переживает ребут Core).
+function storage:reservationSnapshot()
+    return {
+        reservations = self.reservations,
+        reservedById = self.reservedById,
+        seq = self._resSeq,
+    }
+end
+
+--- Восстановить таблицу резерваций из снимка (при загрузке очереди).
+function storage:restoreReservations(snap)
+    if type(snap) ~= "table" then return end
+    self.reservations = type(snap.reservations) == "table" and snap.reservations or {}
+    self.reservedById = type(snap.reservedById) == "table" and snap.reservedById or {}
+    self._resSeq = tonumber(snap.seq) or 0
+end
+
 ----------------------------------------------------------------
 -- СОПОСТАВЛЕНИЕ ПО СПЕЦИФИКАЦИИ (теги / NBT / варианты)
 ----------------------------------------------------------------
@@ -356,13 +373,19 @@ end
 -- EXTRACT / DEPOSIT
 ----------------------------------------------------------------
 
---- Извлечь предметы id в целевой инвентарь.
--- @param id ID предмета
+--- Извлечь предметы id/spec в целевой инвентарь.
+-- @param id ID предмета или spec-таблица
 -- @param count сколько
 -- @param targetPeripheral имя целевого инвентаря
 -- @param targetSlot номер слота (целое) или nil (любой слот)
 -- @return сколько реально перемещено
 function storage:extract(id, count, targetPeripheral, targetSlot)
+    local spec = nil
+    if type(id) == "table" then
+        spec = id
+        id = self:resolveSpec(spec, count)
+        if type(id) ~= "string" then return 0 end
+    end
     local info = self.cache[id]
     if not info or info.total <= 0 then return 0 end
 
@@ -379,10 +402,10 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
             removedStale = true
         else
             -- Сверяем реальный id слота-источника перед переносом.
-            local realId, realQty = nil, 0
+            local realId, realQty, realDet = nil, 0, nil
             if p.getItemDetail then
                 local okD, det = pcall(p.getItemDetail, loc.s)
-                if okD and det then realId, realQty = det.name, det.count or 0 end
+                if okD and det then realId, realQty, realDet = det.name, det.count or 0, det end
             elseif p.list then
                 local okLs, ls = pcall(p.list)
                 if okLs and ls and ls[loc.s] then realId, realQty = ls[loc.s].name, ls[loc.s].count or 0 end
@@ -390,6 +413,9 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
             if realId ~= nil and realId ~= id then
                 table.remove(info.locations, i)
                 removedStale = true
+            elseif spec and realDet and not itemmatch.matches(realDet, spec) then
+                -- Тот же id, но другой NBT/компоненты — не берём этот слот.
+                i = i + 1
             else
                 local toMove = math.min(remaining, loc.qty)
                 if realId == id and realQty < toMove then toMove = realQty end

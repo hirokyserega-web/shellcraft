@@ -111,8 +111,6 @@ function util.saveData(path, data)
     f.close()
     return true
 end
-    return true
-end
 
 function util.deepCopy(obj)
     if type(obj) ~= "table" then return obj end

@@ -13,10 +13,10 @@ util       = require("lib.util")
 net        = require("lib.net")
 config     = require("config")
 updater    = require("updater")
-ru         = require("ru")
+ru         = require("lang.ru")
 names      = require("lib.names")
 lang       = names  -- алиас: lang.display / lang.localize (=display) доступны везде
-errors     = require("errors")
+errors     = require("lang.errors")
 -- Fallback: lang.localize("error_key") для не-item-id (ошибки).
 -- Сначала ищет в errors, иначе делегирует в names.display.
 local _orig_localize = lang.localize

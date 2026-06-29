@@ -1,43 +1,55 @@
 -- core/storage.lua
--- Работа с хранилищем предметов (несколько сундуков/бочек по проводному модему).
--- Поддержка pushItems/pullItems для перемещения между инвентарями.
+-- Учёт предметов в хранилище (несколько сундуков/бочек по проводной сети) +
+-- глобальный менеджер резерваций.
+--
+-- Ключевые обязанности:
+--   * scan()  — полное сканирование инвентарей, кэш { [id] = {total, locations} }
+--   * count(id) / available(id) — физическое и доступное (за вычетом резерва) число
+--   * reserve / release — глобальные резервации, чтобы несколько задач не делили
+--     один и тот же сток (устранение гонок «Not enough X»)
+--   * extract(...) — перенести предметы в целевой инвентарь/слот с проверкой id
+--   * deposit(...) — принять предметы из внешнего инвентаря
+--
+-- Совместимость с UI: count, items, scan, importFrom, names — сохранены.
 
 local storage = {}
 storage.__index = storage
 
 --- Создать объект хранилища.
--- @param peripherals таблица из config.resolve() -> .storage = {имена инвентарей}
+-- @param peripherals таблица из config.resolve() (поле .storage)
 function storage.new(peripherals)
     local self = setmetatable({}, storage)
-    self.names = {}      -- список имён инвентарей
-    self.cache = {}      -- { [id] = { total = n, locations = {{p,s,qty},...} } }
-    self.empty_slots = {} -- кэш свободных слотов для ускорения импорта/депозита
-    self.dirty = {}      -- { [id] = true } предметы, чьи locations протухли и требуют рескана
+    self.names = {}
+    self.cache = {}            -- { [id] = { total = n, locations = {{p,s,qty}} } }
+    self.empty_slots = {}      -- { {p, s} } — кэш свободных слотов
+    self.dirty = {}            -- { [id] = true } протухшие записи
+    self.reservations = {}     -- { [resId] = { id, count, key } }
+    self.reservedById = {}     -- { [id] = total_reserved }
+    self._resSeq = 0
     if peripherals and peripherals.storage then
         for _, name in ipairs(peripherals.storage) do
-            table.insert(self.names, name)
+            self.names[#self.names + 1] = name
         end
     end
     return self
 end
 
---- Обёртка: безопасно получить объект периферии.
 local function wrap(name)
     if not peripheral.isPresent(name) then return nil end
     return peripheral.wrap(name)
 end
 
---- Полное сканирование всех инвентарей.
--- Возвращает карту { [id] = { total = n, locations = {{p,s,qty}}, name = ... } }.
+----------------------------------------------------------------
+-- СКАНИРОВАНИЕ
+----------------------------------------------------------------
+
 function storage:scan()
     local map = {}
     local empty = {}
     local count = 0
     for _, name in ipairs(self.names) do
         count = count + 1
-        if count % 8 == 0 then
-            os.sleep(0)
-        end
+        if count % 8 == 0 then os.sleep(0) end
         local p = wrap(name)
         if p and type(p.list) == "function" and type(p.size) == "function" then
             local ok, items = pcall(p.list)
@@ -45,18 +57,14 @@ function storage:scan()
                 local size = p.size() or 0
                 for slot = 1, size do
                     local info = items[slot]
-                    if info then
+                    if info and info.name then
                         local id = info.name
-                        if id then
-                            local qty = info.count or 0
-                            if not map[id] then
-                                map[id] = { total = 0, locations = {} }
-                            end
-                            map[id].total = map[id].total + qty
-                            table.insert(map[id].locations, { p = name, s = slot, qty = qty })
-                        end
-                    else
-                        table.insert(empty, { p = name, s = slot })
+                        local qty = info.count or 0
+                        if not map[id] then map[id] = { total = 0, locations = {} } end
+                        map[id].total = map[id].total + qty
+                        map[id].locations[#map[id].locations + 1] = { p = name, s = slot, qty = qty }
+                    elseif not info then
+                        empty[#empty + 1] = { p = name, s = slot }
                     end
                 end
             end
@@ -65,19 +73,16 @@ function storage:scan()
     self.cache = map
     self.empty_slots = empty
     self.dirty = {}
+    self._detailCache = {}
     return map
 end
 
---- Пересобрать кэш пустых слотов по живому list() всех инвентарей.
--- Звать при неудачах deposit/очистки, когда self.empty_slots мог протухнуть.
 function storage:refreshEmptySlots()
     local empty = {}
     local count = 0
     for _, name in ipairs(self.names) do
         count = count + 1
-        if count % 8 == 0 then
-            os.sleep(0)
-        end
+        if count % 8 == 0 then os.sleep(0) end
         local p = wrap(name)
         if p and type(p.list) == "function" and type(p.size) == "function" then
             local ok, items = pcall(p.list)
@@ -85,7 +90,7 @@ function storage:refreshEmptySlots()
                 local size = p.size() or 0
                 for slot = 1, size do
                     if not items[slot] then
-                        table.insert(empty, { p = name, s = slot })
+                        empty[#empty + 1] = { p = name, s = slot }
                     end
                 end
             end
@@ -95,9 +100,6 @@ function storage:refreshEmptySlots()
     return empty
 end
 
---- Пересканировать ОДИН предмет: пересчитать total и locations из реального
--- list(), выкинув протухшие записи. Звать, когда extract вернул меньше, чем
--- ожидалось, а предмет должен быть в наличии.
 function storage:rescanItem(id)
     if not id then return 0 end
     local total = 0
@@ -105,9 +107,7 @@ function storage:rescanItem(id)
     local count = 0
     for _, name in ipairs(self.names) do
         count = count + 1
-        if count % 8 == 0 then
-            os.sleep(0)
-        end
+        if count % 8 == 0 then os.sleep(0) end
         local p = wrap(name)
         if p and type(p.list) == "function" then
             local ok, items = pcall(p.list)
@@ -116,7 +116,7 @@ function storage:rescanItem(id)
                     if info and info.name == id then
                         local qty = info.count or 0
                         total = total + qty
-                        table.insert(locations, { p = name, s = slot, qty = qty })
+                        locations[#locations + 1] = { p = name, s = slot, qty = qty }
                     end
                 end
             end
@@ -131,62 +131,240 @@ function storage:rescanItem(id)
     return total
 end
 
---- Сколько всего предмета id в хранилище.
+----------------------------------------------------------------
+-- ЗАПРОСЫ КОЛИЧЕСТВА
+----------------------------------------------------------------
+
+--- Физическое количество предмета (без учёта резерва).
 function storage:count(id)
-    -- Если предмет помечен как протухший — пересканировать прежде чем ответить.
     if self.dirty and self.dirty[id] then
         return self:rescanItem(id)
     end
     if self.cache[id] then return self.cache[id].total end
-    -- fallback: быстрый пересчёт
-    local total = 0
-    for _, name in ipairs(self.names) do
-        local p = wrap(name)
-        if p and p.list then
-            local ok, items = pcall(p.list)
-            if ok and items then
-                for _, info in pairs(items) do
-                    if info.name == id then total = total + (info.count or 0) end
-                end
-            end
-        end
-    end
-    return total
+    return 0
 end
 
---- Список всех ID с количеством (отсканированных).
+--- Сколько зарезервировано предмета id.
+function storage:reserved(id)
+    return self.reservedById[id] or 0
+end
+
+--- Доступно для новых планов = физическое - зарезервированное.
+function storage:available(id)
+    local total = self:count(id)
+    local res = self.reservedById[id] or 0
+    local avail = total - res
+    if avail < 0 then avail = 0 end
+    return avail
+end
+
 function storage:items()
     local result = {}
     for id, info in pairs(self.cache) do
-        table.insert(result, { id = id, count = info.total })
+        result[#result + 1] = { id = id, count = info.total, reserved = self.reservedById[id] or 0 }
     end
     table.sort(result, function(a, b) return a.count > b.count end)
     return result
 end
 
---- Извлечь N предметов с данным id и положить в целевой инвентарь/слот.
+----------------------------------------------------------------
+-- РЕЗЕРВАЦИИ
+----------------------------------------------------------------
+
+--- Зарезервировать count единиц предмета id под задачу.
+-- Возвращает resId (строка) для последующего consume/release.
+-- НЕ проверяет физическое наличие — это делает планировщик. Здесь только учёт.
+function storage:reserve(id, count, key)
+    if not id or not count or count <= 0 then return nil end
+    self._resSeq = self._resSeq + 1
+    local resId = "res_" .. self._resSeq
+    self.reservations[resId] = { id = id, count = count, key = key }
+    self.reservedById[id] = (self.reservedById[id] or 0) + count
+    return resId
+end
+
+--- Полностью снять резервацию (отмена/провал задачи).
+function storage:release(resId)
+    local r = self.reservations[resId]
+    if not r then return 0 end
+    local released = r.count
+    self.reservedById[r.id] = math.max(0, (self.reservedById[r.id] or 0) - released)
+    self.reservations[resId] = nil
+    return released
+end
+
+--- Уменьшить резервацию на amount (при фактическом extract).
+-- Когда резервация исчерпана — удаляется.
+function storage:consumeReservation(resId, amount)
+    local r = self.reservations[resId]
+    if not r then return 0 end
+    amount = math.min(amount or r.count, r.count)
+    r.count = r.count - amount
+    self.reservedById[r.id] = math.max(0, (self.reservedById[r.id] or 0) - amount)
+    if r.count <= 0 then
+        self.reservations[resId] = nil
+    end
+    return amount
+end
+
+--- Снять все резервации по ключу (например, по task_id).
+function storage:releaseByKey(key)
+    if key == nil then return 0 end
+    local released = 0
+    for resId, r in pairs(self.reservations) do
+        if r.key == key then
+            released = released + self:release(resId)
+        end
+    end
+    return released
+end
+
+--- Полная сводка резерваций (для отладки/персиста).
+function storage:reservationSummary()
+    local out = {}
+    for id, qty in pairs(self.reservedById) do
+        if qty > 0 then out[id] = qty end
+    end
+    return out
+end
+
+----------------------------------------------------------------
+-- СОПОСТАВЛЕНИЕ ПО СПЕЦИФИКАЦИИ (теги / NBT / варианты)
+----------------------------------------------------------------
+
+local itemmatch = require("lib.itemmatch")
+
+--- Получить (и закешировать) detail предмета по id из любого слота хранилища.
+-- Нужен для сопоставления по тегам/NBT, которых нет в обычном list().
+function storage:detailFor(id)
+    if not id then return nil end
+    self._detailCache = self._detailCache or {}
+    if self._detailCache[id] ~= nil then
+        return self._detailCache[id] or nil
+    end
+    local info = self.cache[id]
+    if info and info.locations then
+        for _, loc in ipairs(info.locations) do
+            local p = wrap(loc.p)
+            if p and p.getItemDetail then
+                local ok, det = pcall(p.getItemDetail, loc.s)
+                if ok and det and det.name == id then
+                    self._detailCache[id] = det
+                    return det
+                end
+            end
+        end
+    end
+    -- Запомним «нет detail», чтобы не сканировать каждый раз.
+    self._detailCache[id] = false
+    return nil
+end
+
+--- Сбросить кеш detail (после scan, чтобы подхватить новые предметы).
+function storage:clearDetailCache()
+    self._detailCache = {}
+end
+
+--- Является ли spec простым именем (без тегов/вариантов/NBT)?
+local function isPlainName(spec)
+    return type(spec) == "string" or (type(spec) == "table" and (spec.id or spec.name)
+        and not spec.variants and not spec.tag and not spec.tags
+        and spec.nbt == nil and spec.components == nil and not spec.any)
+end
+
+--- Подобрать конкретный id под спецификацию ингредиента, учитывая доступный
+-- (за вычетом резерва) запас. Для простого имени возвращает само имя.
+-- @param spec спецификация (строка/таблица/variants/tag)
+-- @param needed сколько нужно (для выбора варианта с достаточным запасом)
+-- @return concreteId, availableCount  (или nil, 0 если нет подходящего)
+function storage:resolveSpec(spec, needed)
+    needed = needed or 1
+    -- Быстрый путь: простое имя.
+    if isPlainName(spec) then
+        local id = type(spec) == "string" and spec or (spec.id or spec.name)
+        return id, self:available(id)
+    end
+
+    local norm = itemmatch.normalize(spec)
+    if not norm then return nil, 0 end
+
+    -- Кандидаты: явные имена вариантов, иначе — все id в кэше.
+    local candidates = {}
+    local function addCandidate(id)
+        if id then candidates[#candidates + 1] = id end
+    end
+    if norm.variants then
+        for _, v in ipairs(norm.variants) do
+            local vn = itemmatch.normalize(v)
+            if vn and vn.name then addCandidate(vn.name) end
+        end
+    elseif norm.name then
+        addCandidate(norm.name)
+    end
+
+    -- Если кандидаты не заданы именами (тег/any) — перебираем кэш.
+    local scanCache = (#candidates == 0)
+    local best, bestAvail = nil, 0
+    local function consider(id)
+        local det = self:detailFor(id)
+        if not det then det = { name = id } end
+        if itemmatch.matches(det, spec) then
+            local avail = self:available(id)
+            -- Предпочитаем вариант, которого хватает целиком; иначе максимум.
+            if avail >= needed and (best == nil or bestAvail < needed) then
+                best, bestAvail = id, avail
+            elseif avail > bestAvail and not (best and bestAvail >= needed) then
+                best, bestAvail = id, avail
+            end
+        end
+    end
+
+    if scanCache then
+        for id in pairs(self.cache) do consider(id) end
+    else
+        for _, id in ipairs(candidates) do consider(id) end
+    end
+    return best, bestAvail
+end
+
+--- Сумма доступного по спецификации (по всем подходящим вариантам).
+function storage:availableSpec(spec)
+    if isPlainName(spec) then
+        local id = type(spec) == "string" and spec or (spec.id or spec.name)
+        return self:available(id)
+    end
+    local total = 0
+    local norm = itemmatch.normalize(spec)
+    if not norm then return 0 end
+    if norm.variants then
+        for _, v in ipairs(norm.variants) do
+            local id, avail = self:resolveSpec(v, 1)
+            if id then total = total + (self:available(id)) end
+        end
+        return total
+    end
+    for id in pairs(self.cache) do
+        local det = self:detailFor(id) or { name = id }
+        if itemmatch.matches(det, spec) then
+            total = total + self:available(id)
+        end
+    end
+    return total
+end
+
+----------------------------------------------------------------
+-- EXTRACT / DEPOSIT
+----------------------------------------------------------------
+
+--- Извлечь предметы id в целевой инвентарь.
 -- @param id ID предмета
 -- @param count сколько
--- @param targetPeripheral имя целевого инвентаря (куда класть)
--- @param targetSlot слот назначения (опц.). Может быть числом ИЛИ массивом
---        допустимых EXTRA-слотов — extract попробует каждый по порядку.
+-- @param targetPeripheral имя целевого инвентаря
+-- @param targetSlot номер слота (целое) или nil (любой слот)
 -- @return сколько реально перемещено
 function storage:extract(id, count, targetPeripheral, targetSlot)
     local info = self.cache[id]
     if not info or info.total <= 0 then return 0 end
-
-    -- Нормализуем целевые слоты в список. false-сентинел = "любой слот"
-    -- ({ nil } в Lua имеет длину 0 и не итерировался бы).
-    local slots
-    if type(targetSlot) == "table" then
-        slots = {}
-        for _, s in ipairs(targetSlot) do slots[#slots + 1] = s end
-        if #slots == 0 then slots = { false } end
-    elseif targetSlot ~= nil then
-        slots = { targetSlot }
-    else
-        slots = { false }  -- единственный проход: положить в любой подходящий слот
-    end
 
     local remaining = count
     local moved = 0
@@ -197,14 +375,10 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
         local loc = info.locations[i]
         local p = wrap(loc.p)
         if not p then
-            -- Локация недоступна (периферия пропала) — считаем её протухшей.
             table.remove(info.locations, i)
             removedStale = true
         else
-            local toMove = math.min(remaining, loc.qty)
-            -- Z2: проверяем, что локация ФИЗИЧЕСКИ держит нужный предмет. Кэш мог
-            -- протухнуть (в слоте уже другой предмет) — тогда push утащил бы чужое
-            -- и засчитал его как наш. Сверяем id до переноса.
+            -- Сверяем реальный id слота-источника перед переносом.
             local realId, realQty = nil, 0
             if p.getItemDetail then
                 local okD, det = pcall(p.getItemDetail, loc.s)
@@ -214,62 +388,48 @@ function storage:extract(id, count, targetPeripheral, targetSlot)
                 if okLs and ls and ls[loc.s] then realId, realQty = ls[loc.s].name, ls[loc.s].count or 0 end
             end
             if realId ~= nil and realId ~= id then
-                -- Слот держит ДРУГОЙ предмет -> запись протухла, выкинуть и не трогать.
                 table.remove(info.locations, i)
                 removedStale = true
             else
-            if realId == id and realQty < toMove then toMove = realQty end
-            local ok, n = false, 0
-            -- Пробуем по очереди каждый допустимый целевой слот, пока что-то не уйдёт.
-            for si = 1, #slots do
-                local dst = slots[si]
-                ok, n = false, 0
+                local toMove = math.min(remaining, loc.qty)
+                if realId == id and realQty < toMove then toMove = realQty end
+                local ok, n = false, 0
                 if p.pushItems then
-                    if dst then
-                        ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, dst)
+                    if targetSlot then
+                        ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove, targetSlot)
                     else
                         ok, n = pcall(p.pushItems, targetPeripheral, loc.s, toMove)
                     end
                 end
-                if not ok or not n or n == 0 then
-                    -- Fallback: тянем целевым инвентарём из нашей локации.
+                if (not ok or not n or n == 0) then
                     local target = wrap(targetPeripheral)
                     if target and target.pullItems then
-                        if dst then
-                            ok, n = pcall(target.pullItems, loc.p, loc.s, toMove, dst)
+                        if targetSlot then
+                            ok, n = pcall(target.pullItems, loc.p, loc.s, toMove, targetSlot)
                         else
                             ok, n = pcall(target.pullItems, loc.p, loc.s, toMove)
                         end
                     end
                 end
-                if ok and n and n > 0 then break end
-            end
-            if ok and n and n > 0 then
-                moved = moved + n
-                remaining = remaining - n
-                loc.qty = loc.qty - n
-                if loc.qty <= 0 then
-                    if self.empty_slots then
-                        table.insert(self.empty_slots, { p = loc.p, s = loc.s })
+                if ok and n and n > 0 then
+                    moved = moved + n
+                    remaining = remaining - n
+                    loc.qty = loc.qty - n
+                    if loc.qty <= 0 then
+                        self.empty_slots[#self.empty_slots + 1] = { p = loc.p, s = loc.s }
+                        table.remove(info.locations, i)
+                    else
+                        i = i + 1
                     end
-                    table.remove(info.locations, i)
                 else
-                    i = i + 1
+                    -- Слот ничего не отдал: либо протух, либо целевой занят.
+                    table.remove(info.locations, i)
+                    removedStale = true
                 end
-            else
-                -- Ни один слот не принял из этой локации: либо запись протухла,
-                -- либо ВСЕ целевые слоты заняты. Чтобы битые записи не копились,
-                -- удаляем локацию из кэша (НЕ делаем i=i+1 — мы сдвинулись).
-                table.remove(info.locations, i)
-                removedStale = true
-            end
             end
         end
     end
-    if info then info.total = (info.total or 0) - moved end
-
-    -- Недобор при наличии запаса ИЛИ выкинуты протухшие локации — пометить для
-    -- рескана, чтобы кэшированный total самоисправился при следующем count().
+    if info then info.total = math.max(0, (info.total or 0) - moved) end
     if moved < count or removedStale then
         self.dirty = self.dirty or {}
         self.dirty[id] = true
@@ -285,256 +445,160 @@ end
 function storage:deposit(sourcePeripheral, sourceSlot, count)
     local src = wrap(sourcePeripheral)
     if not src then return 0 end
-    
+
     local id, toMove
-    local hasGetItemDetail = type(src.getItemDetail) == "function"
-    local hasList = type(src.list) == "function"
-    local queried = false
-    
-    if hasGetItemDetail then
+    if type(src.getItemDetail) == "function" then
         local ok, detail = pcall(src.getItemDetail, sourceSlot)
         if ok then
-            queried = true
             if detail then
                 id = detail.name
                 toMove = count or detail.count or 0
             else
-                -- Slot is definitely empty!
                 return 0
             end
         end
     end
-    
-    if not queried and hasList then
+    if not id and type(src.list) == "function" then
         local ok, list = pcall(src.list)
         if ok and list then
-            queried = true
             local item = list[sourceSlot]
             if item then
                 id = item.name
                 toMove = count or item.count or 0
             else
-                -- Slot is definitely empty!
                 return 0
             end
         end
     end
+    if not id or not toMove or toMove <= 0 then return 0 end
 
     local moved = 0
 
-    if id and toMove and toMove > 0 then
-        -- 1. Try to deposit into existing slots of the same item ID
-        if self.cache[id] and self.cache[id].locations then
-            for _, loc in ipairs(self.cache[id].locations) do
-                if toMove <= 0 then break end
-                -- Skip depositing into the source peripheral itself
-                if loc.p ~= sourcePeripheral then
-                    local p = wrap(loc.p)
-                    if p then
-                        local ok2, n = false, 0
-                        if p.pullItems then
-                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
-                        end
-                        if not ok2 or not n or n == 0 then
-                            -- Fallback: push from source peripheral
-                            if src.pushItems then
-                                ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
-                            end
-                        end
-                        if ok2 and n and n > 0 then
-                            moved = moved + n
-                            toMove = toMove - n
-                            loc.qty = loc.qty + n
-                        end
+    -- 1) Доложить в существующие стаки того же id.
+    if self.cache[id] and self.cache[id].locations then
+        for _, loc in ipairs(self.cache[id].locations) do
+            if toMove <= 0 then break end
+            if loc.p ~= sourcePeripheral then
+                local p = wrap(loc.p)
+                if p then
+                    local ok2, n = false, 0
+                    if p.pullItems then
+                        ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, loc.s)
                     end
-                end
-            end
-        end
-
-        -- 2. If there are still items left to move, find empty slots using cached self.empty_slots
-        local function fillEmptySlots()
-            if not (toMove > 0 and self.empty_slots) then return end
-            local i = 1
-            while i <= #self.empty_slots and toMove > 0 do
-                local slotInfo = self.empty_slots[i]
-                if slotInfo.p ~= sourcePeripheral then
-                    local p = wrap(slotInfo.p)
-                    if p then
-                        local ok2, n = false, 0
-                        if p.pullItems then
-                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, slotInfo.s)
-                        end
-                        if not ok2 or not n or n == 0 then
-                            if src.pushItems then
-                                ok2, n = pcall(src.pushItems, slotInfo.p, sourceSlot, toMove, slotInfo.s)
-                            end
-                        end
-                        if ok2 and n and n > 0 then
-                            moved = moved + n
-                            toMove = toMove - n
-
-                            -- Update cache
-                            if not self.cache[id] then
-                                self.cache[id] = { total = 0, locations = {} }
-                            end
-                            table.insert(self.cache[id].locations, { p = slotInfo.p, s = slotInfo.s, qty = n })
-
-                            -- Since we put items in this slot, it's no longer empty. Remove it from empty_slots.
-                            table.remove(self.empty_slots, i)
-                        else
-                            i = i + 1
-                        end
-                    else
-                        i = i + 1
+                    if (not ok2 or not n or n == 0) and src.pushItems then
+                        ok2, n = pcall(src.pushItems, loc.p, sourceSlot, toMove, loc.s)
                     end
-                else
-                    i = i + 1
-                end
-            end
-        end
-
-        fillEmptySlots()
-
-        -- W4: ни стаки (path 1), ни пустые слоты (path 2) ничего не приняли, но
-        -- предмет валиден и ещё есть остаток -> кэш пустых слотов мог протухнуть.
-        -- Освежаем его ОДИН раз и повторяем, иначе остаток залипнет в источнике.
-        if moved == 0 and toMove > 0 then
-            self:refreshEmptySlots()
-            fillEmptySlots()
-        end
-
-        -- 3. Update the total cache count
-        if moved > 0 then
-            if not self.cache[id] then
-                self.cache[id] = { total = 0, locations = {} }
-            end
-            self.cache[id].total = (self.cache[id].total or 0) + moved
-        end
-    elseif not queried then
-        -- Fallback path: We do not know what item is in the source slot.
-        -- We will pull from sourceSlot into empty slots of our storage chests using cached empty_slots.
-        local limit = count or 64
-        if self.empty_slots then
-            local i = 1
-            while i <= #self.empty_slots and limit > 0 do
-                local slotInfo = self.empty_slots[i]
-                if slotInfo.p ~= sourcePeripheral then
-                    local p = wrap(slotInfo.p)
-                    if p then
-                        local ok2, n = false, 0
-                        if p.pullItems then
-                            ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, limit, slotInfo.s)
-                        end
-                        if ok2 and n and n > 0 then
-                            moved = moved + n
-                            limit = limit - n
-                            
-                            -- Now wrap/query chest to find out what item we just pulled
-                            local detail
-                            if p.getItemDetail then
-                                local ok3, det = pcall(p.getItemDetail, slotInfo.s)
-                                if ok3 and det then detail = det end
-                            end
-                            if detail and detail.name then
-                                local item_id = detail.name
-                                if not self.cache[item_id] then
-                                    self.cache[item_id] = { total = 0, locations = {} }
-                                end
-                                self.cache[item_id].total = (self.cache[item_id].total or 0) + n
-                                table.insert(self.cache[item_id].locations, { p = slotInfo.p, s = slotInfo.s, qty = n })
-                            end
-                            
-                            table.remove(self.empty_slots, i)
-                        else
-                            -- If we couldn't pull anything, the source slot is likely empty or we can't pull at all.
-                            -- Break out immediately.
-                            break
-                        end
-                    else
-                        i = i + 1
+                    if ok2 and n and n > 0 then
+                        moved = moved + n
+                        toMove = toMove - n
+                        loc.qty = loc.qty + n
                     end
-                else
-                    i = i + 1
                 end
             end
         end
     end
 
+    -- 2) Заполнить пустые слоты.
+    local function fillEmptySlots()
+        if not (toMove > 0) then return end
+        local i = 1
+        while i <= #self.empty_slots and toMove > 0 do
+            local slotInfo = self.empty_slots[i]
+            if slotInfo.p ~= sourcePeripheral then
+                local p = wrap(slotInfo.p)
+                if p then
+                    local ok2, n = false, 0
+                    if p.pullItems then
+                        ok2, n = pcall(p.pullItems, sourcePeripheral, sourceSlot, toMove, slotInfo.s)
+                    end
+                    if (not ok2 or not n or n == 0) and src.pushItems then
+                        ok2, n = pcall(src.pushItems, slotInfo.p, sourceSlot, toMove, slotInfo.s)
+                    end
+                    if ok2 and n and n > 0 then
+                        moved = moved + n
+                        toMove = toMove - n
+                        if not self.cache[id] then self.cache[id] = { total = 0, locations = {} } end
+                        self.cache[id].locations[#self.cache[id].locations + 1] = { p = slotInfo.p, s = slotInfo.s, qty = n }
+                        table.remove(self.empty_slots, i)
+                    else
+                        i = i + 1
+                    end
+                else
+                    i = i + 1
+                end
+            else
+                i = i + 1
+            end
+        end
+    end
+
+    fillEmptySlots()
+
+    if moved == 0 and toMove > 0 then
+        self:refreshEmptySlots()
+        fillEmptySlots()
+    end
+
+    if moved > 0 then
+        if not self.cache[id] then self.cache[id] = { total = 0, locations = {} } end
+        self.cache[id].total = (self.cache[id].total or 0) + moved
+    end
     return moved
 end
 
---- Принять весь слот целиком (deposit всех предметов слота).
 function storage:depositAll(sourcePeripheral, sourceSlot)
     return self:deposit(sourcePeripheral, sourceSlot, nil)
 end
 
---- Импортировать предметы из импортного сундука в хранилище.
--- @param chestName имя сундука (опц., если пусто — автовыбор из конфига)
--- @param slotLimit лимит обрабатываемых заполненных слотов (опц.)
--- @return перемещено предметов, nil | 0, ошибка
+----------------------------------------------------------------
+-- ИМПОРТ
+----------------------------------------------------------------
+
 function storage:importFrom(chestName, slotLimit)
     local targetChest = chestName
-    -- Только если имя не передано явно — смотрим в конфиг
     if not targetChest or targetChest == "" then
         local cfg = config.load()
         targetChest = cfg.default_import
-        if not targetChest or targetChest == "" then
-            if cfg.import_chests and #cfg.import_chests > 0 then
-                for _, name in ipairs(cfg.import_chests) do
-                    if peripheral.isPresent(name) then
-                        targetChest = name
-                        break
-                    end
-                end
+        if (not targetChest or targetChest == "") and cfg.import_chests then
+            for _, name in ipairs(cfg.import_chests) do
+                if peripheral.isPresent(name) then targetChest = name; break end
             end
         end
     end
-
     if not targetChest or targetChest == "" then
         return 0, "No import chest configured"
     end
-
     if not peripheral.isPresent(targetChest) then
         return 0, "Import chest '" .. tostring(targetChest) .. "' is not present on the network"
     end
-
     local p = wrap(targetChest)
     if not p or not p.size or not p.list then
         return 0, "Chest " .. tostring(targetChest) .. " is not reachable or not a container"
     end
-
     if not self.names or #self.names == 0 then
         return 0, "No storage chests/barrels connected to the network"
     end
 
-
-    -- Сканируем содержимое импорт-сундука ОДНИРАЗ (не повторяем после каждого хода)
     local list = p.list()
     local size = p.size()
     local totalMoved = 0
     local slotsProcessed = 0
     local hasItems = false
-    local anyFull = false  -- хоть один слот не удалось полностью перелить
+    local anyFull = false
 
     for slot = 1, size do
         if list[slot] then
             local itemCount = list[slot].count or 0
             if itemCount > 0 then
                 hasItems = true
-                if slotLimit and slotsProcessed >= slotLimit then
-                    break
-                end
+                if slotLimit and slotsProcessed >= slotLimit then break end
                 local n = self:deposit(targetChest, slot, nil)
                 if n > 0 then
                     totalMoved = totalMoved + n
                     slotsProcessed = slotsProcessed + 1
-                    -- Если перенесли не всё — хранилище полное
-                    if n < itemCount then
-                        anyFull = true
-                    end
+                    if n < itemCount then anyFull = true end
                     os.sleep(0)
-                elseif n == 0 then
-                    -- Не удалось перенести ни одного — хранилище полное
+                else
                     anyFull = true
                 end
             end
@@ -544,11 +608,13 @@ function storage:importFrom(chestName, slotLimit)
     if hasItems and totalMoved == 0 then
         return 0, "storage_full"
     end
-
     return totalMoved, anyFull and "partial" or nil
 end
 
---- Получить displayName предмета из getItemDetail (fallback для локализации).
+----------------------------------------------------------------
+-- ИМЕНА
+----------------------------------------------------------------
+
 function storage:displayName(id)
     for _, name in ipairs(self.names) do
         local p = wrap(name)
@@ -556,13 +622,9 @@ function storage:displayName(id)
             local ok, items = pcall(p.list)
             if ok and items then
                 for slot, info in pairs(items) do
-                    if info.name == id then
-                        if p.getItemDetail then
-                            local ok2, det = pcall(p.getItemDetail, slot)
-                            if ok2 and det and det.displayName then
-                                return det.displayName
-                            end
-                        end
+                    if info.name == id and p.getItemDetail then
+                        local ok2, det = pcall(p.getItemDetail, slot)
+                        if ok2 and det and det.displayName then return det.displayName end
                     end
                 end
             end
@@ -571,10 +633,6 @@ function storage:displayName(id)
     return nil
 end
 
---- Собрать displayName для всех уникальных предметов в хранилище
--- и закешировать их через модуль names. Вызывается сервером один раз
--- при старте (и периодически), чтобы UI не дёргал getItemDetail каждый кадр.
--- @param namesModule объект names (lib/names.lua)
 function storage:collectNames(namesModule)
     if not namesModule then return 0 end
     local collected = 0
@@ -585,7 +643,6 @@ function storage:collectNames(namesModule)
             if ok and items then
                 for slot, info in pairs(items) do
                     local id = info.name
-                    -- берём displayName только если ещё не в кеше
                     if id and not namesModule.cache[id] then
                         local ok2, det = pcall(p.getItemDetail, slot)
                         if ok2 and det and det.displayName then

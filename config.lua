@@ -1,58 +1,94 @@
 -- config.lua
--- Автогенерируемый конфиг с автоопределением периферии.
--- Локальные переопределения лежат в config.local.lua (в .gitignore).
+-- ShellCraft config + auto-detection.
+-- Local overrides live in config.local.lua (ignored by git).
+--
+-- Important transport options:
+--   transfer_mode = "buffer" | "wired"
+--     * buffer: default, uses a dedicated input chest + output chest for each worker
+--     * wired : legacy direct pushItems/pullItems into turtle inventory
+--   workers: optional explicit buffer assignments for turtles
+--     workers = {
+--       [turtleId] = { input = "chest_name", output = "chest_name" },
+--     }
 
 local config = {}
 
---- Дефолтный конфиг.
 config.defaults = {
     role = "core",             -- "core" | "worker"
-    core_id = nil,             -- для worker: ID core-компьютера (число)
+    core_id = nil,              -- worker: ID of the core computer
+
     recipes_file = "recipes.dat",
     workers_file = "workers.dat",
+    queue_file = "queue.dat",
+    storage_state_file = "storage_state.dat",
     log_file = "shellcraft.log",
+
     update_url = "https://raw.githubusercontent.com/hirokyserega-web/shellcraft/main/",
-    update_interval = 300,     -- проверка обновлений раз в N секунд
+    update_interval = 300,
     net_timeout = 5,
     heartbeat_interval = 10,
-    task_timeout = 120,        -- per-task crafting deadline in seconds
-    heartbeat_grace = 15,      -- seconds to ignore stale busy=false heartbeats after dispatch
-    use_russian_names = false, -- Requires a Cyrillic font resource pack or transliteration
-    text_scale = 0.5,          -- Text scale for monitor (e.g. 1.0 or 0.5)
-    grid_chest = nil,          -- default storage grid chest for recording recipes
-    grid_dank = nil,           -- default dank (fluid tank)
-    github_token = nil,        -- GitHub PAT token for private repos or rate limit bypass
-    import_chests = {},        -- list of import chests
-    default_import = nil,      -- default import chest
-    -- Ручное переопределение периферии (пусто = автоопределение)
+    task_timeout = 120,
+    heartbeat_grace = 15,
+
+    -- Crafting transport
+    transfer_mode = "buffer",  -- "buffer" | "wired"
+    worker_buffer_mode = "auto", -- "auto" | "manual"
+    worker_buffer_timeout = 10,
+    worker_buffer_wait = 2,
+
+    -- Auto-import / auxiliary chests
+    grid_chest = nil,
+    recipe_input_chest = nil,
+    grid_dank = nil,
+    default_import = nil,
+    import_chests = {},
+
+    -- Human display
+    use_russian_names = false,
+    text_scale = 0.5,
+
+    -- Optional manual IDs for explicit per-worker buffer pairing.
+    workers = {},
+
+    -- Peripheral overrides.
     peripherals = {
-        storage   = {},        -- список имён chest/barrel
-        monitors  = {},
-        modems    = {},
-        machines  = {},
+        storage = {},
+        monitors = {},
+        modems = {},
+        machines = {},
+        buffers = {},
+        buffer_inputs = {},
+        buffer_outputs = {},
+        turtles = {},
     },
+
+    -- Optional names the operator wants to exclude from auto detection.
     manual_roles = {},
 }
 
---- Загрузить конфиг (с локальными переопределениями).
+local function shallowCopy(t)
+    local out = {}
+    if type(t) ~= "table" then return out end
+    for k, v in pairs(t) do out[k] = v end
+    return out
+end
+
 function config.load()
     local cfg = util.loadData("config.dat", config.defaults)
-    -- config.local.lua — выполняемый lua, возвращает таблицу
     if util.fileExists("config.local.lua") then
         local ok, localCfg = pcall(function() return dofile("config.local.lua") end)
         if ok and type(localCfg) == "table" then
             for k, v in pairs(localCfg) do cfg[k] = v end
         end
     end
+    if type(cfg.workers) ~= "table" then cfg.workers = {} end
+    if type(cfg.peripherals) ~= "table" then cfg.peripherals = shallowCopy(config.defaults.peripherals) end
     return cfg
 end
 
---- Сохранить конфиг.
--- ВАЖНО: не сохраняем cfg.peripherals — там авто-обнаруженные значения,
--- которые не должны становиться «ручными» переопределениями при следующей загрузке.
 function config.save(cfg)
     local toSave = {}
-    for k, v in pairs(cfg) do
+    for k, v in pairs(cfg or {}) do
         if k ~= "peripherals" then
             toSave[k] = v
         end
@@ -60,45 +96,52 @@ function config.save(cfg)
     util.saveData("config.dat", toSave)
 end
 
---- Проверить, является ли периферия инвентарём (chest/barrel/сундук).
--- Имеет методы list() и size().
 local function isInventory(name)
-    local ok = pcall(peripheral.wrap, name)
-    if not ok then return false end
     local p = peripheral.wrap(name)
     if not p then return false end
-    local ptype = peripheral.getType(name)
-    if ptype == "create:item_vault" or ptype == "item_vault" then
-        return true
-    end
-    return type(p.list) == "function" and type(p.size) == "function"
+    if type(p.list) ~= "function" or type(p.size) ~= "function" then return false end
+    return true
 end
 
---- Проверить, является ли периферия машиной (печь и т.п.).
--- Имеет методы list/size и знает о слотах результата или burnTime.
+local function isFluidStorage(name)
+    local p = peripheral.wrap(name)
+    if not p then return false end
+    if type(p.tanks) == "function" then return true end
+    local ptype = (peripheral.getType(name) or ""):lower()
+    return ptype:find("fluid") ~= nil or ptype:find("tank") ~= nil or ptype:find("dank") ~= nil
+end
+
+local function isMonitor(name)
+    return peripheral.getType(name) == "monitor"
+end
+
+local function isModem(name)
+    return peripheral.getType(name) == "modem"
+end
+
+local function isCraftingTurtle(name)
+    local ptype = (peripheral.getType(name) or ""):lower()
+    if ptype ~= "turtle" then return false end
+    local p = peripheral.wrap(name)
+    return p and type(p.craft) == "function"
+end
+
 local function isMachine(name)
     local p = peripheral.wrap(name)
     if not p then return false end
     if type(p.list) ~= "function" or type(p.size) ~= "function" then return false end
     local ptype = (peripheral.getType(name) or "unknown"):lower()
-    
-    -- Известные типы машин
-    local known = {
-        ["minecraft:furnace"] = true,
-        ["minecraft:blast_furnace"] = true,
-        ["minecraft:smoker"] = true,
-        ["minecraft:brewer"] = true,
-        ["create:millstone"] = true,
-        ["create:crushing_wheels"] = true,
-        furnace = true,
-        blast_furnace = true,
-        smoker = true,
-        brewer = true,
-    }
-    if known[ptype] then return true end
-    if type(p.getBurnTime) == "function" then return true end
 
-    -- Если имя типа содержит слова-маркеры машин:
+    local storageKeywords = {
+        "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer",
+        "cabinet", "box", "bag", "dank", "safe", "pocket"
+    }
+    for _, kw in ipairs(storageKeywords) do
+        if ptype:find(kw) then
+            return false
+        end
+    end
+
     local machineKeywords = {
         "furnace", "smelt", "mill", "crush", "press", "cook", "kiln", "grind",
         "pulveriz", "saw", "centrifug", "extract", "compress", "assembl", "machine",
@@ -106,144 +149,161 @@ local function isMachine(name)
         "purif", "recombin", "charg", "generat", "reactor", "combiner", "crafter", "metal"
     }
     for _, kw in ipairs(machineKeywords) do
-        if ptype:find(kw) then
-            return true
-        end
+        if ptype:find(kw) then return true end
     end
 
-    -- Если это инвентарь, но НЕ является сундуком/бочкой/хранилищем
+    if type(p.getBurnTime) == "function" then return true end
+    if ptype:find("furnace") or ptype:find("smoker") or ptype:find("brewer") then return true end
+    return false
+end
+
+local function isStorage(name)
+    local ptype = (peripheral.getType(name) or ""):lower()
     local storageKeywords = {
         "chest", "barrel", "vault", "shulker", "crate", "storage", "drawer",
         "cabinet", "box", "bag", "dank", "safe", "pocket"
     }
-    local isStorage = false
     for _, kw in ipairs(storageKeywords) do
-        if ptype:find(kw) then
-            isStorage = true
-            break
-        end
+        if ptype:find(kw) then return true end
     end
-
-    if not isStorage then
-        local sz = p.size()
-        if sz and sz <= 6 then
-            return true
-        end
-    end
-    
-    return false
+    return isInventory(name) and not isMachine(name) and not isCraftingTurtle(name) and not isFluidStorage(name)
 end
 
---- Автоопределение всей периферии.
--- Возвращает обновлённый список peripherals.
+local function pushUnique(list, seen, name)
+    if name and not seen[name] then
+        seen[name] = true
+        list[#list + 1] = name
+    end
+end
+
 function config.detect()
-    local detected = { storage = {}, monitors = {}, modems = {}, machines = {} }
+    local detected = {
+        storage = {},
+        monitors = {},
+        modems = {},
+        machines = {},
+        buffers = {},
+        buffer_inputs = {},
+        buffer_outputs = {},
+        turtles = {},
+    }
     for _, name in ipairs(peripheral.getNames()) do
-        local ptype = peripheral.getType(name)
-        if ptype == "modem" then
-            table.insert(detected.modems, name)
-        elseif ptype == "monitor" then
-            table.insert(detected.monitors, name)
+        if isModem(name) then
+            pushUnique(detected.modems, detected, name)
+        elseif isMonitor(name) then
+            pushUnique(detected.monitors, detected, name)
+        elseif isCraftingTurtle(name) then
+            pushUnique(detected.turtles, detected, name)
         elseif isMachine(name) then
-            table.insert(detected.machines, name)
+            pushUnique(detected.machines, detected, name)
+        elseif isStorage(name) then
+            pushUnique(detected.storage, detected, name)
         elseif isInventory(name) then
-            table.insert(detected.storage, name)
+            pushUnique(detected.buffers, detected, name)
+        end
+        if peripheral.hasType(name, "inventory") and not isStorage(name) and not isCraftingTurtle(name) then
+            local ptype = (peripheral.getType(name) or ""):lower()
+            if ptype:find("buffer") or ptype:find("input") or ptype:find("output") then
+                if ptype:find("input") then pushUnique(detected.buffer_inputs, detected, name) end
+                if ptype:find("output") then pushUnique(detected.buffer_outputs, detected, name) end
+            end
         end
     end
     return detected
 end
 
 function config.resolve(cfg)
+    cfg = cfg or config.load()
     local auto = config.detect()
-    local result = { storage = {}, monitors = {}, modems = {}, machines = {} }
-    local manual_roles = cfg.manual_roles or {}
-    
-    -- 1. Сначала разрешаем машины
-    local manualMachines = cfg.peripherals and cfg.peripherals.machines
-    local machinesSet = {}
-    
-    -- Всегда добавляем ручные машины из старого конфига
-    if manualMachines and #manualMachines > 0 then
-        for _, name in ipairs(manualMachines) do
-            if peripheral.isPresent(name) then
-                table.insert(result.machines, name)
-                machinesSet[name] = true
-            end
-        end
-    end
-    
-    -- Добавляем машины из manual_roles
-    for name, role in pairs(manual_roles) do
-        if role == "machine" and peripheral.isPresent(name) then
-            if not machinesSet[name] then
-                table.insert(result.machines, name)
-                machinesSet[name] = true
-            end
-        end
-    end
-    
-    -- Добавляем автоопределённые машины (если они не переопределены вручную)
-    for _, name in ipairs(auto.machines or {}) do
-        if not machinesSet[name] and manual_roles[name] ~= "storage" and manual_roles[name] ~= "ignored" then
-            table.insert(result.machines, name)
-            machinesSet[name] = true
-        end
-    end
-    
-    -- 2. Сбор импортных сундуков
-    local importSet = {}
-    if cfg.import_chests then
-        for _, name in ipairs(cfg.import_chests) do
-            importSet[name] = true
-        end
-    end
-    if cfg.default_import then
-        importSet[cfg.default_import] = true
-    end
-    
-    -- Исключаемые сундуки (чтобы система не забирала из них предметы как из обычного склада)
-    local excludeSet = {}
-    for name in pairs(importSet) do excludeSet[name] = true end
-    if cfg.grid_chest then excludeSet[cfg.grid_chest] = true end
-    if cfg.recipe_input_chest then excludeSet[cfg.recipe_input_chest] = true end
-    
-    -- 3. Разрешаем остальные категории
-    for k in pairs(result) do
-        if k ~= "machines" then
-            local manual = cfg.peripherals and cfg.peripherals[k]
-            if manual and #manual > 0 then
-                for _, name in ipairs(manual) do
-                    if peripheral.isPresent(name) then
-                        local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
-                        if not isExcluded and manual_roles[name] ~= "ignored" then
-                            table.insert(result[k], name)
-                        end
-                    end
-                end
-            else
-                -- Сначала добавим те, у которых manual_roles[name] == k
-                local added_manual = {}
-                for name, role in pairs(manual_roles) do
-                    if role == k and peripheral.isPresent(name) then
-                        local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
-                        if not isExcluded then
-                            table.insert(result[k], name)
-                            added_manual[name] = true
-                        end
-                    end
-                end
+    local result = {
+        storage = {},
+        monitors = {},
+        modems = {},
+        machines = {},
+        buffers = {},
+        buffer_inputs = {},
+        buffer_outputs = {},
+        turtles = {},
+    }
+    -- Один набор «уже добавлено» на каждую категорию.
+    local seen = {}
+    for k in pairs(result) do seen[k] = {} end
 
-                for _, name in ipairs(auto[k] or {}) do
-                    if not added_manual[name] and manual_roles[name] ~= "ignored" and manual_roles[name] ~= "machine" then
-                        local isExcluded = (k == "storage" and (excludeSet[name] or machinesSet[name]))
-                        if not isExcluded then
-                            table.insert(result[k], name)
-                        end
-                    end
-                end
+    local function add(dst, name)
+        if name and peripheral.isPresent(name) and result[dst] then
+            pushUnique(result[dst], seen[dst], name)
+        end
+    end
+
+    local manual_roles = cfg.manual_roles or {}
+    local manual = cfg.peripherals or {}
+
+    -- 1. Явные ручные списки в cfg.peripherals.
+    for _, name in ipairs(manual.modems or {}) do add("modems", name) end
+    for _, name in ipairs(manual.monitors or {}) do add("monitors", name) end
+    for _, name in ipairs(manual.storage or {}) do if manual_roles[name] ~= "ignored" then add("storage", name) end end
+    for _, name in ipairs(manual.machines or {}) do add("machines", name) end
+    for _, name in ipairs(manual.buffers or {}) do add("buffers", name) end
+    for _, name in ipairs(manual.buffer_inputs or {}) do add("buffer_inputs", name) end
+    for _, name in ipairs(manual.buffer_outputs or {}) do add("buffer_outputs", name) end
+    for _, name in ipairs(manual.turtles or {}) do add("turtles", name) end
+
+    -- 2. Ручные роли (manual_roles) переопределяют автоопределение.
+    local roleToDst = {
+        storage = "storage", machine = "machines", buffer = "buffers",
+        buffer_input = "buffer_inputs", buffer_output = "buffer_outputs",
+        monitor = "monitors", modem = "modems", turtle = "turtles",
+    }
+    for name, role in pairs(manual_roles) do
+        local dst = roleToDst[role]
+        if dst then add(dst, name) end
+    end
+
+    -- 3. Автоопределённые — только если для имени НЕТ ручной роли.
+    local function appendAuto(dst, names)
+        for _, name in ipairs(names or {}) do
+            if not manual_roles[name] then add(dst, name) end
+        end
+    end
+    appendAuto("storage", auto.storage)
+    appendAuto("monitors", auto.monitors)
+    appendAuto("modems", auto.modems)
+    appendAuto("machines", auto.machines)
+    appendAuto("buffers", auto.buffers)
+    appendAuto("buffer_inputs", auto.buffer_inputs)
+    appendAuto("buffer_outputs", auto.buffer_outputs)
+    appendAuto("turtles", auto.turtles)
+
+    -- 4. Буферные сундуки и служебные сундуки не должны считаться хранилищем.
+    local exclude = {}
+    for _, name in ipairs(result.buffers) do exclude[name] = true end
+    for _, name in ipairs(result.buffer_inputs) do exclude[name] = true end
+    for _, name in ipairs(result.buffer_outputs) do exclude[name] = true end
+    -- Явно назначенные буферы воркеров в cfg.workers тоже исключаем из склада.
+    if type(cfg.workers) == "table" then
+        for _, w in pairs(cfg.workers) do
+            if type(w) == "table" then
+                if w.input then exclude[w.input] = true end
+                if w.output then exclude[w.output] = true end
             end
         end
     end
+    if cfg.grid_chest then exclude[cfg.grid_chest] = true end
+    if cfg.recipe_input_chest then exclude[cfg.recipe_input_chest] = true end
+    if cfg.default_import then exclude[cfg.default_import] = true end
+    if type(cfg.import_chests) == "table" then
+        for _, name in ipairs(cfg.import_chests) do exclude[name] = true end
+    end
+
+    local filteredStorage = {}
+    local filteredSeen = {}
+    for _, name in ipairs(result.storage) do
+        if not exclude[name] then
+            pushUnique(filteredStorage, filteredSeen, name)
+        end
+    end
+    result.storage = filteredStorage
+
     return result
 end
 

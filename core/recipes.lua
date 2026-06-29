@@ -1,30 +1,126 @@
 -- core/recipes.lua
--- Хранение, загрузка, сохранение рецептов. Режим обучения.
+-- Хранение, загрузка, обучение рецептов + современная модель ингредиентов.
 --
--- Формат рецепта:
+-- Формат ячейки ингредиента (cell) — любое из:
+--   * "minecraft:oak_log"                          — простой id
+--   * { id = "minecraft:oak_log", count = 1 }      — id + количество
+--   * { tag = "minecraft:planks", count = 1 }      — тег (любой предмет тега)
+--   * { variants = { id1, id2, ... }, count = 1 }  — любой из перечисленных
+--   * { id = ..., nbt = ..., components = ... }     — точное совпадение по NBT
+--
+-- Рецепт:
 --   {
---     id       = "minecraft:oak_planks",   -- ID результата
---     name     = "Дубовые доски",           -- русское имя (опц.)
---     type     = "shaped" | "shapeless" | "machine",
---     output   = 4,                          -- сколько выходит за 1 крафт
---     pattern  = {{id,id,nil},{id,nil,nil},{nil,nil,nil}},  -- для shaped
---     ingredients = {{id="minecraft:oak_log", count=1}},    -- для shapeless
---     machine  = "minecraft:furnace",        -- для machine
---     input    = {{id, count}},              -- для machine
+--     id      = "minecraft:chest",
+--     name    = "...",                  -- displayName (опц.)
+--     type    = "shaped" | "shapeless" | "machine" | "station",
+--     output  = 1,                       -- сколько ВЫХОДНЫХ предметов за 1 операцию
+--     pattern = {{cell,cell,cell}, ...}, -- 3x3 для shaped
+--     ingredients = { cell, cell, ... }, -- для shapeless
+--     input   = { cell, ... },           -- для machine
+--     schema_version = 2,
 --   }
+--
+-- Семантика count: запрошенное число ВЫХОДНЫХ предметов. Число операций =
+-- ceil(want / output). Последняя операция может дать небольшой излишек, но
+-- суммарный выход всегда >= запрошенного.
+
+local itemmatch = require("lib.itemmatch")
 
 local recipes = {}
 recipes.__index = recipes
 
+recipes.SCHEMA_VERSION = 2
+
+local GRID = { 1, 2, 3, 5, 6, 7, 9, 10, 11 }
+recipes.GRID = GRID
+
 function recipes.new(path)
     local self = setmetatable({}, recipes)
     self.path = path or "recipes.dat"
-    self.list = {}            -- { [id] = recipe }
+    self.list = {}
     self:load()
     return self
 end
 
---- Загрузить из файла.
+----------------------------------------------------------------
+-- НОРМАЛИЗАЦИЯ / МИГРАЦИЯ
+----------------------------------------------------------------
+
+--- Привести ячейку к каноническому виду (или nil для пустой).
+function recipes.normalizeCell(cell)
+    if cell == nil then return nil end
+    if type(cell) == "string" then
+        if cell == "" then return nil end
+        if cell:sub(1, 1) == "#" then
+            return { tag = cell:sub(2), count = 1 }
+        end
+        return { id = cell, count = 1 }
+    end
+    if type(cell) ~= "table" then
+        return { id = tostring(cell), count = 1 }
+    end
+    local out = { count = cell.count or 1 }
+    if cell.variants then
+        out.variants = {}
+        for _, v in ipairs(cell.variants) do
+            local nv = recipes.normalizeCell(v)
+            if nv then out.variants[#out.variants + 1] = nv end
+        end
+    end
+    if cell.tag then out.tag = cell.tag end
+    if cell.id or cell.name then out.id = cell.id or cell.name end
+    if cell.nbt ~= nil then out.nbt = cell.nbt end
+    if cell.components ~= nil then out.components = cell.components end
+    if cell.any then out.any = true end
+    if not (out.id or out.tag or out.variants or out.any) then
+        return nil
+    end
+    return out
+end
+
+--- Миграция одного рецепта к актуальной схеме (на месте, возвращает рецепт).
+function recipes.migrate(r)
+    if type(r) ~= "table" then return r end
+    r.type = r.type or "shaped"
+    r.output = r.output or 1
+    if r.type == "shaped" and r.pattern then
+        for row = 1, 3 do
+            local prow = r.pattern[row]
+            if prow then
+                for col = 1, 3 do
+                    prow[col] = recipes.normalizeCell(prow[col])
+                end
+            end
+        end
+    elseif r.type == "shapeless" and r.ingredients then
+        local norm = {}
+        for _, ing in ipairs(r.ingredients) do
+            local c = recipes.normalizeCell(ing)
+            if c then norm[#norm + 1] = c end
+        end
+        r.ingredients = norm
+    elseif (r.type == "machine" or r.type == "station") then
+        if r.input then
+            local norm = {}
+            for _, ing in ipairs(r.input) do
+                local c = recipes.normalizeCell(ing)
+                if c then norm[#norm + 1] = c end
+            end
+            r.input = norm
+        end
+        if r.itemInput then
+            local norm = {}
+            for _, ing in ipairs(r.itemInput) do
+                local c = recipes.normalizeCell(ing)
+                if c then norm[#norm + 1] = c end
+            end
+            r.itemInput = norm
+        end
+    end
+    r.schema_version = recipes.SCHEMA_VERSION
+    return r
+end
+
 function recipes:load()
     if not fs.exists(self.path) then self.list = {}; return end
     local f = fs.open(self.path, "r")
@@ -32,12 +128,20 @@ function recipes:load()
     local content = f.readAll()
     f.close()
     local data = textutils.unserialize(content)
-    if type(data) == "table" then
-        self.list = data
+    if type(data) ~= "table" then self.list = {}; return end
+    local migrated = false
+    for id, r in pairs(data) do
+        if type(r) == "table" then
+            if (r.schema_version or 1) < recipes.SCHEMA_VERSION then
+                recipes.migrate(r)
+                migrated = true
+            end
+        end
     end
+    self.list = data
+    if migrated then self:save() end
 end
 
---- Сохранить в файл.
 function recipes:save()
     local f = fs.open(self.path, "w")
     if not f then return false end
@@ -46,14 +150,12 @@ function recipes:save()
     return true
 end
 
---- Добавить/обновить рецепт.
--- Статистику времени (avgTime, timingCount) переносим из старой версии рецепта:
--- обновление раскладки не обнуляет накопленные замеры.
 function recipes:add(recipe)
     if not recipe or not recipe.id then return false end
     local old = self.list[recipe.id]
     recipe.output = recipe.output or 1
     recipe.type = recipe.type or "shaped"
+    recipes.migrate(recipe)
     if old and old.avgTime and not recipe.avgTime then
         recipe.avgTime = old.avgTime
         recipe.samples = old.samples
@@ -64,7 +166,6 @@ function recipes:add(recipe)
     return true
 end
 
---- Удалить рецепт.
 function recipes:remove(id)
     if self.list[id] then
         self.list[id] = nil
@@ -74,7 +175,6 @@ function recipes:remove(id)
     return false
 end
 
---- Получить рецепт по id.
 function recipes:get(id)
     if self.list[id] then return self.list[id] end
     if type(id) == "string" and id:sub(1, 6) == "fluid:" then
@@ -82,9 +182,7 @@ function recipes:get(id)
         for _, r in pairs(self.list) do
             if r.fluidOutput then
                 for _, fo in ipairs(r.fluidOutput) do
-                    if fo.fluid == fluidName then
-                        return r
-                    end
+                    if fo.fluid == fluidName then return r end
                 end
             end
         end
@@ -92,78 +190,97 @@ function recipes:get(id)
     return nil
 end
 
---- Список всех рецептов (массив).
 function recipes:all()
     local arr = {}
-    for id, r in pairs(self.list) do
-        table.insert(arr, r)
-    end
+    for _, r in pairs(self.list) do arr[#arr + 1] = r end
     table.sort(arr, function(a, b) return (a.id or "") < (b.id or "") end)
     return arr
 end
 
---- Есть ли рецепт для id?
 function recipes:has(id)
     return self:get(id) ~= nil
 end
 
---- Нормализованный список ингредиентов рецепта.
--- Возвращает массив { {id=..., count=...}, ... }.
+----------------------------------------------------------------
+-- ЯЧЕЙКИ И ИНГРЕДИЕНТЫ
+----------------------------------------------------------------
+
+--- Представительный id ячейки (для UI/логов/учёта).
+function recipes.cellId(cell)
+    local c = recipes.normalizeCell(cell)
+    if not c then return nil end
+    if c.id then return c.id end
+    if c.variants and c.variants[1] then return recipes.cellId(c.variants[1]) end
+    if c.tag then return "#" .. c.tag end
+    if c.any then return "*" end
+    return nil
+end
+
+--- Массив ячеек в порядке сетки (1..9) для shaped; для shapeless — по ингредиентам.
+function recipes.cells(recipe)
+    local out = {}
+    if recipe.type == "shaped" and recipe.pattern then
+        for i = 1, 9 do
+            local row = math.ceil(i / 3)
+            local col = ((i - 1) % 3) + 1
+            local cell = recipe.pattern[row] and recipe.pattern[row][col]
+            out[i] = recipes.normalizeCell(cell)
+        end
+    elseif recipe.type == "shapeless" and recipe.ingredients then
+        for idx, ing in ipairs(recipe.ingredients) do
+            out[idx] = recipes.normalizeCell(ing)
+        end
+    end
+    return out
+end
+
+--- Агрегированные ингредиенты рецепта на 1 операцию: { {id, count, spec, key} }.
 function recipes.ingredientsOf(recipe)
-    local result = {}
-    local agg = {}  -- [id] = count
+    local agg = {}     -- key -> { id, count, spec }
+    local order = {}
+    local function addCell(cell)
+        local c = recipes.normalizeCell(cell)
+        if not c then return end
+        local key = itemmatch.specKey(c)
+        if not agg[key] then
+            agg[key] = { id = recipes.cellId(c), count = 0, spec = c, key = key }
+            order[#order + 1] = key
+        end
+        agg[key].count = agg[key].count + (c.count or 1)
+    end
+
     if recipe.type == "shaped" and recipe.pattern then
         for r = 1, 3 do
             local row = recipe.pattern[r]
             if row then
-                for c = 1, 3 do
-                    local cell = row[c]
-                    if cell then
-                        if type(cell) == "table" and cell.id then
-                            agg[cell.id] = (agg[cell.id] or 0) + (cell.count or 1)
-                        elseif type(cell) == "string" then
-                            agg[cell] = (agg[cell] or 0) + 1
-                        end
-                    end
-                end
+                for col = 1, 3 do addCell(row[col]) end
             end
         end
     elseif recipe.type == "shapeless" and recipe.ingredients then
-        for _, ing in ipairs(recipe.ingredients) do
-            local iid = ing.id or ing
-            agg[iid] = (agg[iid] or 0) + (ing.count or 1)
-        end
-    elseif (recipe.type == "station" or recipe.type == "machine") and recipe.itemInput then
-        for _, ing in ipairs(recipe.itemInput) do
-            local iid = ing.id
-            agg[iid] = (agg[iid] or 0) + (ing.count or 1)
-        end
-    elseif recipe.type == "machine" and recipe.input then
-        for _, ing in ipairs(recipe.input) do
-            local iid = ing.id or ing
-            agg[iid] = (agg[iid] or 0) + (ing.count or 1)
-        end
+        for _, ing in ipairs(recipe.ingredients) do addCell(ing) end
+    elseif (recipe.type == "station" or recipe.type == "machine") then
+        local src = recipe.itemInput or recipe.input
+        if src then for _, ing in ipairs(src) do addCell(ing) end end
     end
-    for id, count in pairs(agg) do
-        table.insert(result, { id = id, count = count })
-    end
-    table.sort(result, function(a, b) return a.id < b.id end)
+
+    local result = {}
+    for _, key in ipairs(order) do result[#result + 1] = agg[key] end
+    table.sort(result, function(a, b) return tostring(a.id) < tostring(b.id) end)
     return result
 end
 
---- Агрегированный массив входных жидкостей рецепта.
 function recipes.fluidsOf(recipe)
     local result = {}
     if recipe.fluidInput then
         for _, f in ipairs(recipe.fluidInput) do
-            table.insert(result, { fluid = f.fluid, mb = f.mb })
+            result[#result + 1] = { fluid = f.fluid, mb = f.mb }
         end
     end
     table.sort(result, function(a, b) return a.fluid < b.fluid end)
     return result
 end
 
---- Сколько крафтов/циклов нужно для want штук/мБ результата.
+--- Сколько операций (крафтов/циклов) нужно для want штук/мБ результата.
 function recipes.craftsNeeded(recipe, want)
     if recipe.type == "station" then
         if recipe.output and recipe.output > 0 then
@@ -172,81 +289,114 @@ function recipes.craftsNeeded(recipe, want)
             return math.ceil(want / recipe.fluidOutput[1].mb)
         end
         return want
-    else
-        return math.ceil(want / (recipe.output or 1))
     end
+    return math.ceil(want / (recipe.output or 1))
 end
 
---- Вычислить суммарное количество предметов входа на ОДИН крафт.
 function recipes.itemsPerCraft(recipe)
     local inPer = 0
     if not recipe then return 0 end
-    if recipe.type == "shapeless" and recipe.ingredients then
-        for _, ing in ipairs(recipe.ingredients) do
-            local icount = 1
-            if type(ing) == "table" then
-                icount = ing.count or 1
-            end
-            inPer = inPer + icount
-        end
-    elseif recipe.type == "shaped" and recipe.pattern then
-        for r = 1, 3 do
-            local row = recipe.pattern[r]
-            if row then
-                for c = 1, 3 do
-                    local cell = row[c]
-                    if cell then
-                        inPer = inPer + 1
-                    end
-                end
-            end
-        end
-    elseif (recipe.type == "station" or recipe.type == "machine") and recipe.itemInput then
-        for _, ing in ipairs(recipe.itemInput) do
-            inPer = inPer + (ing.count or 1)
-        end
-    elseif recipe.type == "machine" and recipe.input then
-        for _, ing in ipairs(recipe.input) do
-            local icount = 1
-            if type(ing) == "table" then
-                icount = ing.count or 1
-            end
-            inPer = inPer + icount
-        end
+    for _, ing in ipairs(recipes.ingredientsOf(recipe)) do
+        inPer = inPer + (ing.count or 1)
     end
     return inPer
 end
 
 --- Полная потребность в ингредиентах для want штук результата.
--- Возвращает массив { {id, count} }.
+-- @return массив { {id, count, spec} }, crafts
 function recipes.ingredientsFor(recipe, wantCount)
     local crafts = recipes.craftsNeeded(recipe, wantCount)
     local ings = recipes.ingredientsOf(recipe)
     local result = {}
     for _, ing in ipairs(ings) do
-        table.insert(result, { id = ing.id, count = ing.count * crafts })
+        result[#result + 1] = { id = ing.id, count = ing.count * crafts, spec = ing.spec }
     end
     return result, crafts
 end
 
---- Полная потребность в жидкостях для want штук результата.
--- Возвращает массив { {fluid, mb} }.
 function recipes.fluidsFor(recipe, wantCount)
     local crafts = recipes.craftsNeeded(recipe, wantCount)
     local fls = recipes.fluidsOf(recipe)
     local result = {}
     for _, f in ipairs(fls) do
-        table.insert(result, { fluid = f.fluid, mb = f.mb * crafts })
+        result[#result + 1] = { fluid = f.fluid, mb = f.mb * crafts }
     end
     return result, crafts
 end
 
---- Построить рецепт из раскладки черепахи (слоты 1..9).
--- @param slots таблица { [1..9] = {id, count} } (только занятые)
--- @param resultId ID результата
--- @param resultCount сколько вышло
--- @param resultName русское имя (опц.)
--- @return рецепт
+----------------------------------------------------------------
+-- РАЗРЕШЕНИЕ СПЕЦИФИКАЦИЙ В КОНКРЕТНЫЙ КРАФТ
+----------------------------------------------------------------
+
+--- Построить «конкретный» рецепт: каждая ячейка-спецификация заменяется на
+-- конкретный id, выбранный по доступному запасу через storage:resolveSpec.
+-- Это то, что отправляется воркеру (он работает только с id).
+-- @param recipe исходный рецепт
+-- @param crafts число операций (для оценки потребности при выборе варианта)
+-- @param storageObj объект storage (с resolveSpec); может быть nil — тогда
+--        берём представительный id ячейки без проверки запаса.
+-- @return concreteRecipe | nil, errorMessage
+function recipes.resolveConcrete(recipe, crafts, storageObj)
+    crafts = crafts or 1
+    local function pick(cell)
+        local c = recipes.normalizeCell(cell)
+        if not c then return nil end
+        local need = (c.count or 1) * crafts
+        if storageObj and storageObj.resolveSpec then
+            local id = storageObj:resolveSpec(c, need)
+            if id then return { id = id, count = c.count or 1 } end
+            -- не нашли в запасе — вернём представительный (план проверит наличие)
+        end
+        local rep = recipes.cellId(c)
+        if rep and rep:sub(1, 1) ~= "#" and rep ~= "*" then
+            return { id = rep, count = c.count or 1 }
+        end
+        return nil, "Unresolved ingredient: " .. tostring(rep)
+    end
+
+    local out = {
+        id = recipe.id,
+        name = recipe.name,
+        type = recipe.type,
+        output = recipe.output or 1,
+        avgTime = recipe.avgTime,
+    }
+
+    if recipe.type == "shaped" and recipe.pattern then
+        out.pattern = {}
+        for row = 1, 3 do
+            out.pattern[row] = {}
+            local prow = recipe.pattern[row]
+            for col = 1, 3 do
+                if prow and prow[col] then
+                    local concrete, err = pick(prow[col])
+                    if not concrete then
+                        return nil, err or ("Unresolved cell " .. row .. "," .. col)
+                    end
+                    out.pattern[row][col] = concrete
+                else
+                    out.pattern[row][col] = nil
+                end
+            end
+        end
+    elseif recipe.type == "shapeless" and recipe.ingredients then
+        out.ingredients = {}
+        for _, ing in ipairs(recipe.ingredients) do
+            local concrete, err = pick(ing)
+            if not concrete then return nil, err or "Unresolved ingredient" end
+            out.ingredients[#out.ingredients + 1] = concrete
+        end
+    else
+        return nil, "resolveConcrete supports shaped/shapeless only"
+    end
+
+    return out
+end
+
+----------------------------------------------------------------
+-- ОБУЧЕНИЕ
+----------------------------------------------------------------
+
 function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
     local pattern = {}
     for row = 0, 2 do
@@ -256,11 +406,9 @@ function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
             local s = slots[idx]
             if s and s.id then
                 r[col] = { id = s.id, count = s.count or 1 }
-            else
-                r[col] = nil
             end
         end
-        table.insert(pattern, r)
+        pattern[#pattern + 1] = r
     end
     return {
         id = resultId,
@@ -268,22 +416,14 @@ function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
         type = "shaped",
         output = resultCount or 1,
         pattern = pattern,
+        schema_version = recipes.SCHEMA_VERSION,
     }
 end
 
-
-
---- Обучить рецепт из текущей раскладки черепахи (слоты 1..9).
--- 1) читает слоты 1..9 (запоминает pattern),
--- 2) делает turtle.craft(1),
--- 3) находит результат (предмет, которого не было в слотах),
--- 4) строит и сохраняет рецепт.
--- @return true, recipe | false, ошибка
 function recipes:learnFromTurtle()
     if not turtle then
         return false, "learning is only available on a turtle"
     end
-    local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local slots = {}
     for i = 1, 9 do
         local slot = GRID[i]
@@ -314,8 +454,7 @@ function recipes:learnFromTurtle()
         local ok2, det = pcall(turtle.getItemDetail, i)
         if ok2 and det and det.name then
             local snap = snapshot[i]
-            local isNew = (not snap) or (snap.name ~= det.name)
-            if isNew then
+            if (not snap) or (snap.name ~= det.name) then
                 resultId = det.name
                 resultCount = det.count
                 resultName = det.displayName
@@ -331,11 +470,6 @@ function recipes:learnFromTurtle()
     return true, recipe
 end
 
---- Обучить рецепт из подключенного хранилища (сундук/бочка).
--- Первые 3 ряда (слоты 1-27) используются для 3x3 сетки крафта.
--- Любой предмет вне колонок сетки крафта (или ниже 3 ряда) считается результатом.
--- @param invName имя периферии хранилища
--- @return true, recipe | false, ошибка
 function recipes:learnFromStorage(invName, recipeType, machineType)
     local p = peripheral.wrap(invName)
     if not p
@@ -345,26 +479,19 @@ function recipes:learnFromStorage(invName, recipeType, machineType)
        or type(p.pullItems) ~= "function" then
         return false, "Storage chest is not reachable as an inventory. Connect the storage peripheral to the wired network and enable it."
     end
-    
+
     local size = p.size()
     local inventoryList = p.list()
-    
-    -- Для маленьких сундуков (до 27 слотов): слоты 1-9 = 3x3 сетка, слот 10+ = результат
-    -- Для больших (54 слота, двойной сундук): 9-колоночная раскладка как раньше
+
     local pattern = {}
     for r = 1, 3 do
         pattern[r] = {}
-        for c = 1, 3 do
-            pattern[r][c] = nil
-        end
     end
-    
-    local outputSlot = nil
-    local outputItem = nil
+
+    local outputSlot, outputItem
     local hasRecipeItems = false
-    
+
     if size < 27 then
-        -- Simple mode: slots 1-9 = 3x3 grid
         for slot = 1, math.min(9, size) do
             local item = inventoryList[slot]
             if item then
@@ -374,7 +501,6 @@ function recipes:learnFromStorage(invName, recipeType, machineType)
                 hasRecipeItems = true
             end
         end
-        -- Результат ищем в слотах 10+
         for slot = 10, size do
             local item = inventoryList[slot]
             if item and not outputSlot then
@@ -383,8 +509,6 @@ function recipes:learnFromStorage(invName, recipeType, machineType)
             end
         end
     else
-        -- Режим 9-колоночного сундука (двойной сундук):
-        -- Первые 3 ряда по 9 колонок, крайние левые 3 колонки = сетка
         local colMin = 9
         for slot = 1, math.min(27, size) do
             local item = inventoryList[slot]
@@ -395,52 +519,38 @@ function recipes:learnFromStorage(invName, recipeType, machineType)
             end
         end
         if colMin > 7 then colMin = 7 end
-        
-        local gridCols = {
-            [colMin] = 1,
-            [colMin + 1] = 2,
-            [colMin + 2] = 3
-        }
-        
+        local gridCols = { [colMin] = 1, [colMin + 1] = 2, [colMin + 2] = 3 }
         for slot = 1, size do
             local item = inventoryList[slot]
             if item then
                 local row = math.floor((slot - 1) / 9) + 1
                 local col = (slot - 1) % 9 + 1
-                
                 local isRecipeSlot = (row <= 3) and gridCols[col]
                 if isRecipeSlot then
-                    local gridCol = gridCols[col]
-                    pattern[row][gridCol] = { id = item.name, count = item.count or 1 }
-                else
-                    if not outputSlot then
-                        outputSlot = slot
-                        outputItem = item
-                    end
+                    pattern[row][gridCols[col]] = { id = item.name, count = item.count or 1 }
+                elseif not outputSlot then
+                    outputSlot = slot
+                    outputItem = item
                 end
             end
         end
     end
-    
+
     if not hasRecipeItems then
         return false, "no items in crafting grid (place items in slots 1-9)"
     end
-    
     if not outputSlot or not outputItem then
         return false, "no output item found (place result in slot 10+)"
     end
-    
-    local displayName = nil
+
+    local displayName
     if p.getItemDetail then
         local ok, detail = pcall(p.getItemDetail, outputSlot)
-        if ok and detail and detail.displayName then
-            displayName = detail.displayName
-        end
+        if ok and detail and detail.displayName then displayName = detail.displayName end
     end
-    
+
     local recipe
     if recipeType == "machine" then
-        -- Aggregate pattern slots into inputs
         local agg = {}
         for r = 1, 3 do
             for c = 1, 3 do
@@ -451,11 +561,8 @@ function recipes:learnFromStorage(invName, recipeType, machineType)
             end
         end
         local input = {}
-        for id, count in pairs(agg) do
-            table.insert(input, { id = id, count = count })
-        end
+        for id, count in pairs(agg) do input[#input + 1] = { id = id, count = count } end
         table.sort(input, function(a, b) return a.id < b.id end)
-        
         recipe = {
             id = outputItem.name,
             name = displayName or outputItem.name,
@@ -473,17 +580,11 @@ function recipes:learnFromStorage(invName, recipeType, machineType)
             pattern = pattern,
         }
     end
-    
+
     self:add(recipe)
     return true, recipe
 end
 
---- Активное обучение рецепта для печи/механизма.
--- Перемещает 1 предмет из хранилища в механизм, запускает переработку,
--- забирает результат обратно в хранилище и сохраняет рецепт.
--- @param storageName имя сундука/бочки с исходным сырьем
--- @param machineName имя механизма (печки)
--- @return true, recipe | false, ошибка
 function recipes:activeLearnMachine(storageName, machineName)
     local pStorage = peripheral.wrap(storageName)
     if not pStorage
@@ -501,82 +602,59 @@ function recipes:activeLearnMachine(storageName, machineName)
        or type(pMachine.pullItems) ~= "function" then
         return false, "Machine is not reachable as an inventory."
     end
-    
+
     local storageList = pStorage.list()
-    local inputSlot = nil
-    local inputItem = nil
+    local inputSlot, inputItem
     for slot, item in pairs(storageList) do
-        if item then
-            inputSlot = slot
-            inputItem = item
-            break
-        end
+        if item then inputSlot = slot; inputItem = item; break end
     end
     if not inputSlot then
         return false, "storage chest is empty (place the item to process inside it)"
     end
-    
-    -- 1. Очищаем ВСЕ слоты машины (возвращаем их в сундук-хранилище)
+
     local sz = pMachine.size() or 0
     local machineList = pMachine.list() or {}
     for s = 1, sz do
-        if machineList[s] then
-            pcall(pMachine.pushItems, storageName, s)
-        end
+        if machineList[s] then pcall(pMachine.pushItems, storageName, s) end
     end
-    
-    -- Перемещаем 1 сырье в первый слот
+
     local pushed = pStorage.pushItems(machineName, inputSlot, 1, 1)
-    if pushed == 0 then
-        -- Если не получилось в первый слот, пробуем без указания слота
-        pushed = pStorage.pushItems(machineName, inputSlot, 1)
-    end
-    if pushed == 0 then
-        return false, "could not push item to machine"
-    end
-    
-    local outputItemDetail = nil
-    local outputSlot = nil
+    if pushed == 0 then pushed = pStorage.pushItems(machineName, inputSlot, 1) end
+    if pushed == 0 then return false, "could not push item to machine" end
+
+    local outputItemDetail, outputSlot
     local deadline = os.clock() + 60
     while os.clock() < deadline do
-        if pMachine.list then
-            local ok, items = pcall(pMachine.list)
-            if ok and items then
-                for slot, item in pairs(items) do
-                    if item and item.name ~= inputItem.name then
-                        outputItemDetail = item
-                        outputSlot = slot
-                        break
-                    end
+        local ok, items = pcall(pMachine.list)
+        if ok and items then
+            for slot, item in pairs(items) do
+                if item and item.name ~= inputItem.name then
+                    outputItemDetail = item
+                    outputSlot = slot
+                    break
                 end
             end
         end
         if outputItemDetail then
             if pMachine.getItemDetail then
                 local ok2, det = pcall(pMachine.getItemDetail, outputSlot)
-                if ok2 and det and det.displayName then
-                    outputItemDetail.displayName = det.displayName
-                end
+                if ok2 and det and det.displayName then outputItemDetail.displayName = det.displayName end
             end
             break
         end
         os.sleep(0.5)
     end
-    
+
     if not outputItemDetail then
-        -- Возвращаем оставшееся сырье назад в сундук
         local list = pMachine.list() or {}
         for s = 1, sz do
-            if list[s] then
-                pcall(pMachine.pushItems, storageName, s)
-            end
+            if list[s] then pcall(pMachine.pushItems, storageName, s) end
         end
         return false, "timeout waiting for machine processing"
     end
-    
-    -- Забираем результат в сундук
+
     pMachine.pushItems(storageName, outputSlot)
-    
+
     local mType = peripheral.getType(machineName)
     local targetMachine = mType
     local ptypeLower = (mType or ""):lower()
@@ -590,10 +668,8 @@ function recipes:activeLearnMachine(storageName, machineName)
             if name == machineName then isSpecific = true; break end
         end
     end
-    if isSpecific then
-        targetMachine = machineName
-    end
-    
+    if isSpecific then targetMachine = machineName end
+
     local recipe = {
         id = outputItemDetail.name,
         name = outputItemDetail.displayName or outputItemDetail.name,
@@ -606,14 +682,6 @@ function recipes:activeLearnMachine(storageName, machineName)
     return true, recipe
 end
 
---- Активное обучение крафтового рецепта на удаленной черепахе.
--- Читает 3x3 раскладку из хранилища, очищает черепаху,
--- раскладывает ингредиенты в черепаху, посылает Rednet-команду скрафтить,
--- забирает результат и остатки назад в хранилище и сохраняет рецепт.
--- @param storageName имя сундука/бочки с ингредиентами
--- @param workerId ID черепахи-воркера
--- @param dispatcherObj объект dispatcher
--- @return true, recipe | false, ошибка
 function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
     local pStorage = peripheral.wrap(storageName)
     if not pStorage
@@ -623,35 +691,25 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
        or type(pStorage.pullItems) ~= "function" then
         return false, "Storage chest is not reachable as an inventory."
     end
-    
+
     local turtleName = dispatcherObj:workerName(workerId)
     if not turtleName then
         return false, "turtle worker is not attached to the wired modem network"
     end
     local pTurtle = peripheral.wrap(turtleName)
     if not pTurtle then
-       return false, "Turtle #"..tostring(workerId).." is not reachable. Connect the turtle to a WIRED modem and ENABLE it (right-click the modem, it must glow red)."
+       return false, "Turtle #" .. tostring(workerId) .. " is not reachable on the wired network."
     end
-    
-    -- 1. Читаем раскладку из сундука
+
     local storageSize = pStorage.size()
     local storageList = pStorage.list()
-    
+
     local pattern = {}
     local transfers = {}
-    local GRID = {1, 2, 3, 5, 6, 7, 9, 10, 11}
-    
-    for r = 1, 3 do
-        pattern[r] = {}
-        for c = 1, 3 do
-            pattern[r][c] = nil
-        end
-    end
-    
+    for r = 1, 3 do pattern[r] = {} end
     local hasRecipeItems = false
-    
+
     if storageSize < 27 then
-        -- Simple mode: slots 1-9 = 3x3 grid
         for slot = 1, math.min(9, storageSize) do
             local item = storageList[slot]
             if item then
@@ -659,13 +717,11 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
                 local col = (slot - 1) % 3 + 1
                 pattern[row][col] = { id = item.name, count = 1 }
                 local gridIdx = (row - 1) * 3 + col
-                local turtleSlot = GRID[gridIdx]
-                table.insert(transfers, { srcSlot = slot, dstSlot = turtleSlot })
+                transfers[#transfers + 1] = { srcSlot = slot, dstSlot = GRID[gridIdx] }
                 hasRecipeItems = true
             end
         end
     else
-        -- Режим 9-колоночного двойного сундука
         local colMin = 9
         for slot = 1, math.min(27, storageSize) do
             local item = storageList[slot]
@@ -676,90 +732,62 @@ function recipes:activeLearnCraft(storageName, workerId, dispatcherObj)
             end
         end
         if colMin > 7 then colMin = 7 end
-        
-        local gridCols = {
-            [colMin] = 1,
-            [colMin + 1] = 2,
-            [colMin + 2] = 3
-        }
-        
+        local gridCols = { [colMin] = 1, [colMin + 1] = 2, [colMin + 2] = 3 }
         for slot = 1, math.min(27, storageSize) do
             local item = storageList[slot]
-            if item then
+            if item and gridCols[(slot - 1) % 9 + 1] then
                 local row = math.floor((slot - 1) / 9) + 1
-                local col = (slot - 1) % 9 + 1
-                if gridCols[col] then
-                    local gridCol = gridCols[col]
-                    pattern[row][gridCol] = { id = item.name, count = 1 }
-                    local gridIdx = (row - 1) * 3 + gridCol
-                    local turtleSlot = GRID[gridIdx]
-                    table.insert(transfers, { srcSlot = slot, dstSlot = turtleSlot })
-                end
+                local gridCol = gridCols[(slot - 1) % 9 + 1]
+                pattern[row][gridCol] = { id = item.name, count = 1 }
+                local gridIdx = (row - 1) * 3 + gridCol
+                transfers[#transfers + 1] = { srcSlot = slot, dstSlot = GRID[gridIdx] }
             end
         end
     end
-    
+
     if not hasRecipeItems then
         return false, "no items in crafting grid (place items in slots 1-9)"
     end
-    
-    -- Очищаем черепаху в сундук
-    for s = 1, 16 do
-        pStorage.pullItems(turtleName, s)
-    end
-    
-    -- Раскладываем ингредиенты
+
+    for s = 1, 16 do pStorage.pullItems(turtleName, s) end
     for _, trans in ipairs(transfers) do
         local pushed = pStorage.pushItems(turtleName, trans.srcSlot, 1, trans.dstSlot)
         if pushed == 0 then
-            -- Возврат в случае ошибки
-            for s = 1, 16 do
-                pStorage.pullItems(turtleName, s)
-            end
+            for s = 1, 16 do pStorage.pullItems(turtleName, s) end
             return false, "could not transfer ingredients to turtle slots"
         end
     end
-    
-    -- Посылаем запрос крафта по rednet
-    local net = _G.net or require("lib.net")
-    net.send(workerId, net.MSG.LEARN_CRAFT_REQUEST, {})
-    
-    -- Ждем ответа
-    local responseMsg = nil
+
+    local netmod = _G.net or require("lib.net")
+    netmod.send(workerId, netmod.MSG.LEARN_CRAFT_REQUEST, {})
+
+    local responseMsg
     local deadline = os.clock() + 15
     while os.clock() < deadline do
-        local senderId, msg = net.receive(1)
-        if senderId == workerId and msg.type == net.MSG.LEARN_CRAFT_RESPONSE then
+        local senderId, msg = netmod.receive(1)
+        if senderId == workerId and msg and msg.type == netmod.MSG.LEARN_CRAFT_RESPONSE then
             responseMsg = msg.payload
             break
         end
     end
-    
+
     if not responseMsg then
-        for s = 1, 16 do
-            pStorage.pullItems(turtleName, s)
-        end
+        for s = 1, 16 do pStorage.pullItems(turtleName, s) end
         return false, "timeout waiting for turtle craft response"
     end
-    
     if not responseMsg.success then
-        for s = 1, 16 do
-            pStorage.pullItems(turtleName, s)
-        end
+        for s = 1, 16 do pStorage.pullItems(turtleName, s) end
         return false, tostring(responseMsg.error)
     end
-    
-    -- Забираем все предметы (результат и остатки) назад в сундук
-    for s = 1, 16 do
-        pStorage.pullItems(turtleName, s)
-    end
-    
+
+    for s = 1, 16 do pStorage.pullItems(turtleName, s) end
+
     local recipe = {
         id = responseMsg.name,
         name = responseMsg.displayName or responseMsg.name,
         type = "shaped",
         output = responseMsg.count or 1,
-        pattern = pattern
+        pattern = pattern,
     }
     self:add(recipe)
     return true, recipe
@@ -769,9 +797,6 @@ end
 -- ВРЕМЯ КРАФТА
 ----------------------------------------------------------------
 
---- Оценка времени на 1 операцию (крафт/cycle) для рецепта.
--- Если реальных замеров нет — возвращает дефолт по типу + approximate=true.
--- @return secondsPerOp, approximate(bool)
 function recipes.avgTimeFor(recipe)
     if not recipe then return 1.0, true end
     if recipe.avgTime and recipe.avgTime > 0 then
@@ -781,16 +806,12 @@ function recipes.avgTimeFor(recipe)
     return def, true
 end
 
---- Обновить скользящее среднее времени на 1 операцию.
--- @param id ID рецепта
--- @param perOpSec время на 1 крафт/cycle (сек)
 function recipes:updateTiming(id, perOpSec)
     local r = self.list[id]
     if not r or not perOpSec or perOpSec <= 0 then return end
     if not r.avgTime then
         r.avgTime = perOpSec
     else
-        -- экспоненциальное скользящее среднее (alpha=0.3)
         r.avgTime = 0.3 * perOpSec + 0.7 * r.avgTime
     end
     r.samples = (r.samples or 0) + 1
@@ -798,31 +819,28 @@ function recipes:updateTiming(id, perOpSec)
     self:save()
 end
 
+----------------------------------------------------------------
+-- СНИМКИ ДЛЯ ОБУЧЕНИЯ СТАНЦИЙ (совместимость с UI)
+----------------------------------------------------------------
+
 local function wrap(name)
     if not peripheral.isPresent(name) then return nil end
     return peripheral.wrap(name)
 end
 
---- Сделать снимок инвентаря и баков конкретной станции
 function recipes.snapshotStation(name)
     local p = wrap(name)
     if not p then return { items = {}, fluids = {} } end
     local items = {}
     local fluids = {}
-    
-    -- Предметы
     if p.list and p.size then
         local ok, list = pcall(p.list)
         if ok and list then
-            for slot, info in pairs(list) do
-                if info.name then
-                    items[info.name] = (items[info.name] or 0) + (info.count or 0)
-                end
+            for _, info in pairs(list) do
+                if info.name then items[info.name] = (items[info.name] or 0) + (info.count or 0) end
             end
         end
     end
-    
-    -- Жидкости
     if p.tanks then
         local ok, tks = pcall(p.tanks)
         if ok and tks then
@@ -834,54 +852,33 @@ function recipes.snapshotStation(name)
             end
         end
     end
-    
     return { items = items, fluids = fluids }
 end
 
---- Сделать полный снимок для обучения (сундук + станция + баки)
 function recipes.snapshotAll(stationName, inputChestName, storageObj, fluidsObj)
     local items = {}
     local fluids = {}
-    
-    -- 1. Предметы в input chest
     if inputChestName then
         local p = wrap(inputChestName)
         if p and p.list then
             local ok, list = pcall(p.list)
             if ok and list then
                 for _, info in pairs(list) do
-                    if info.name then
-                        items[info.name] = (items[info.name] or 0) + (info.count or 0)
-                    end
+                    if info.name then items[info.name] = (items[info.name] or 0) + (info.count or 0) end
                 end
             end
         end
     end
-    
-    -- 2. Предметы и жидкости в самой станции
     if stationName then
         local snap = recipes.snapshotStation(stationName)
-        for id, qty in pairs(snap.items) do
-            items[id] = (items[id] or 0) + qty
-        end
-        for f, mb in pairs(snap.fluids) do
-            fluids[f] = (fluids[f] or 0) + mb
-        end
+        for id, qty in pairs(snap.items) do items[id] = (items[id] or 0) + qty end
+        for f, mb in pairs(snap.fluids) do fluids[f] = (fluids[f] or 0) + mb end
     end
-    
-    -- 3. Жидкости в данках и пуле
     if fluidsObj then
-        -- Обновляем кеш жидкостей
         fluidsObj:scan()
-        
-        -- Общий пул
         if fluidsObj.cache then
-            for f, info in pairs(fluidsObj.cache) do
-                fluids[f] = (fluids[f] or 0) + info.total
-            end
+            for f, info in pairs(fluidsObj.cache) do fluids[f] = (fluids[f] or 0) + info.total end
         end
-        
-        -- Данки
         if fluidsObj.danks then
             for _, dk in ipairs(fluidsObj.danks) do
                 local info = fluidsObj.dank_cache[dk.periph]
@@ -891,7 +888,6 @@ function recipes.snapshotAll(stationName, inputChestName, storageObj, fluidsObj)
             end
         end
     end
-    
     return { items = items, fluids = fluids }
 end
 

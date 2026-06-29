@@ -1,35 +1,72 @@
 -- core/dispatcher.lua
--- Раздача задач крафта воркерам-черепахам через rednet.
--- Очередь задач, учёт занятых/свободных воркеров, повтор при падении.
+-- Очередь задач, планирование, резервирование и раздача craft-задач воркерам.
 --
--- Перемещение предметов: Core pushItems'ает ингредиенты ПРЯМО в инвентарь черепахи
--- (по проводному модему, имя = "turtle_<id>"), а после крафта pullItems'ает результат
--- обратно. Воркеру не нужны буферные сундуки — только wired+wireless модемы.
+-- Поддерживает два transport mode:
+--   * buffer (default): Core кладёт ингредиенты в входной сундук воркера,
+--     воркер работает только с соседними сундуками через turtle.suck/drop.
+--   * wired: legacy direct pushItems/pullItems into turtle inventory.
+--
+-- Public API retained where practical:
+--   new, setEventHandler, addWorker, removeWorker, workerList, freeCount,
+--   workerCount, queueTask, requestCraft, tick, handleMessage, checkTimeouts,
+--   activeTasks, allTasks, cancelTask, batchCrafts, workerName, findTurtleName.
 
 local dispatcher = {}
 dispatcher.__index = dispatcher
 
-local taskSeq = 0
-local function newTaskId()
-    taskSeq = taskSeq + 1
-    return "task_" .. os.getComputerID() .. "_" .. taskSeq .. "_" .. math.floor(os.clock() * 1000)
+local function now()
+    if os.epoch then return os.epoch("utc") / 1000 end
+    return os.clock()
 end
 
---- Создать диспетчер.
--- @param storage объект storage
--- @param machines объект machines (опц., для машинных рецептов)
+local function emit(self, etype, payload)
+    if self.onEvent then self.onEvent(etype, payload) end
+end
+
+local seq = 0
+local function newTaskId()
+    seq = seq + 1
+    return string.format("task_%d_%d_%d", os.getComputerID(), seq, math.floor(now() * 1000))
+end
+
+local function clone(t)
+    return util.deepCopy and util.deepCopy(t) or textutils.unserialize(textutils.serialize(t))
+end
+
+local function listContains(arr, value)
+    for _, v in ipairs(arr or {}) do
+        if v == value then return true end
+    end
+    return false
+end
+
+local function removeValue(arr, value)
+    for i, v in ipairs(arr or {}) do
+        if v == value then table.remove(arr, i); return true end
+    end
+    return false
+end
+
 function dispatcher.new(storage, machines, fluids)
     local self = setmetatable({}, dispatcher)
     self.storage = storage
     self.machines = machines
     self.fluids = fluids
-    self.workers = {}     -- [id] = { info, state, current_task, last_seen, task_started_at, task_deadline, turtle_name }
-    self.tasks = {}       -- [task_id] = task
-    self.queue = {}       -- массив task_id
+    self.recipes = nil
+    self.workers = {}        -- [id] = worker state
+    self.tasks = {}          -- [task_id] = task
+    self.queue = {}          -- array of task ids
+    self.task_order = 0
     self.maxAttempts = 3
-    self.task_timeout = 120  -- fallback per-task deadline in seconds (configurable)
-    self.heartbeat_grace = 15  -- seconds to ignore stale busy=false heartbeats after dispatch
+    self.task_timeout = 120
+    self.heartbeat_grace = 15
+    self.transport_mode = (config and config.load and config.load().transfer_mode) or "buffer"
+    self._rrCursor = 0
+    self._persistencePath = (config and config.load and config.load().queue_file) or "queue.dat"
+    self._lastSave = 0
+    self._dirty = false
     self.onEvent = nil
+    self._workerSeq = 0
     return self
 end
 
@@ -37,79 +74,82 @@ function dispatcher:setEventHandler(fn)
     self.onEvent = fn
 end
 
-local function emit(self, etype, payload)
-    if self.onEvent then self.onEvent(etype, payload) end
-end
+----------------------------------------------------------------
+-- WORKER REGISTRY
+----------------------------------------------------------------
 
---- Найти сетевое имя черепахи по её id.
--- Перебирает peripheral.getNames(), ищет turtle/computer с matching getID().
 function dispatcher:findTurtleName(workerId)
-    local localSides = { top = true, bottom = true, left = true, right = true, front = true, back = true }
-    
-    -- 1. Сначала ищем по сети (имя не является локальной стороной)
     for _, name in ipairs(peripheral.getNames()) do
-        if not localSides[name] then
-            local ptype = peripheral.getType(name)
-            if ptype == "turtle" or ptype == "computer" then
-                local ok, id = pcall(peripheral.call, name, "getID")
-                if ok and id == workerId then
-                    return name
-                end
-            end
+        local ptype = (peripheral.getType(name) or ""):lower()
+        if ptype == "turtle" or ptype == "computer" then
+            local ok, id = pcall(peripheral.call, name, "getID")
+            if ok and id == workerId then return name end
         end
     end
-    
-    -- 2. Вторая попытка: локальные стороны как fallback
-    for _, name in ipairs(peripheral.getNames()) do
-        if localSides[name] then
-            local ptype = peripheral.getType(name)
-            if ptype == "turtle" or ptype == "computer" then
-                local ok, id = pcall(peripheral.call, name, "getID")
-                if ok and id == workerId then
-                    return name
-                end
-            end
-        end
-    end
-    
     return nil
 end
 
---- Сетевое имя воркера (с кэшем).
 function dispatcher:workerName(workerId)
     local w = self.workers[workerId]
     if not w then return nil end
     if w.turtle_name then return w.turtle_name end
-    local name = self:findTurtleName(workerId)
-    w.turtle_name = name
-    return name
+    w.turtle_name = self:findTurtleName(workerId)
+    return w.turtle_name
 end
 
---- Зарегистрировать воркера.
+local function workerState(nowTs)
+    return {
+        state = "free",
+        current_task = nil,
+        last_seen = nowTs,
+        turtle_name = nil,
+        buffer = nil,
+        busy = false,
+        task_started_at = nil,
+        task_deadline = nil,
+        handshake = nil,
+        current_task_id = nil,
+        ready = false,
+    }
+end
+
 function dispatcher:addWorker(id, info)
+    local ts = now()
     if not self.workers[id] then
-        self.workers[id] = { info = info or {}, state = "free", current_task = nil, last_seen = os.clock(), turtle_name = nil }
+        self.workers[id] = workerState(ts)
+        self.workers[id].info = info or {}
         emit(self, "worker_join", { id = id, info = info })
     else
         self.workers[id].info = info or self.workers[id].info
-        self.workers[id].last_seen = os.clock()
+        self.workers[id].last_seen = ts
     end
+    self._dirty = true
 end
 
 function dispatcher:removeWorker(id)
-    if self.workers[id] then
-        if self.workers[id].current_task then
-            self:requeue(self.workers[id].current_task)
-        end
-        self.workers[id] = nil
-        emit(self, "worker_leave", { id = id })
+    local w = self.workers[id]
+    if not w then return end
+    if w.current_task then
+        self:requeue(w.current_task, "worker_removed")
     end
+    self.workers[id] = nil
+    emit(self, "worker_leave", { id = id })
+    self._dirty = true
 end
 
 function dispatcher:workerList()
     local arr = {}
     for id, w in pairs(self.workers) do
-        table.insert(arr, { id = id, state = w.state, info = w.info, current = w.current_task and w.current_task.id or nil })
+        arr[#arr + 1] = {
+            id = id,
+            state = w.state,
+            info = w.info,
+            current = w.current_task and w.current_task.id or nil,
+            busy = w.busy,
+            ready = w.ready,
+            buffer = clone(w.buffer),
+            last_seen = w.last_seen,
+        }
     end
     table.sort(arr, function(a, b) return a.id < b.id end)
     return arr
@@ -118,12 +158,11 @@ end
 function dispatcher:freeCount()
     local n = 0
     for _, w in pairs(self.workers) do
-        if w.state == "free" then n = n + 1 end
+        if w.state == "free" and w.ready ~= false then n = n + 1 end
     end
     return n
 end
 
---- Полное число зарегистрированных воркеров (для оценки параллельности).
 function dispatcher:workerCount()
     local n = 0
     for _ in pairs(self.workers) do n = n + 1 end
@@ -131,13 +170,126 @@ function dispatcher:workerCount()
 end
 
 function dispatcher:findFree()
+    local ids = {}
     for id, w in pairs(self.workers) do
-        if w.state == "free" then return id, w end
+        if w.state == "free" and w.ready ~= false then ids[#ids + 1] = id end
     end
-    return nil
+    if #ids == 0 then return nil end
+    table.sort(ids)
+    self._rrCursor = (self._rrCursor % #ids) + 1
+    local idx = self._rrCursor
+    return ids[idx], self.workers[ids[idx]]
 end
 
---- Поставить задачу в очередь.
+----------------------------------------------------------------
+-- PERSISTENCE
+----------------------------------------------------------------
+
+function dispatcher:markDirty()
+    self._dirty = true
+end
+
+function dispatcher:serialize()
+    local tasks = {}
+    for id, task in pairs(self.tasks) do
+        tasks[id] = {
+            id = task.id,
+            recipe = task.recipe,
+            count = task.count,
+            status = task.status,
+            attempts = task.attempts,
+            step = task.step,
+            progress = task.progress,
+            result = task.result,
+            dependencies = task.dependencies,
+            dependents = task.dependents,
+            worker_id = task.worker_id,
+            batch_index = task.batch_index,
+            batch_total = task.batch_total,
+            reservation_id = task.reservation_id,
+            plan = task.plan,
+            task_type = task.task_type,
+            created_at = task.created_at,
+            updated_at = task.updated_at,
+            requested = task.requested,
+        }
+    end
+    local workers = {}
+    for id, w in pairs(self.workers) do
+        workers[id] = {
+            info = w.info,
+            state = w.state,
+            current_task_id = w.current_task and w.current_task.id or nil,
+            last_seen = w.last_seen,
+            buffer = w.buffer,
+            turtle_name = w.turtle_name,
+            busy = w.busy,
+            ready = w.ready,
+            task_started_at = w.task_started_at,
+            task_deadline = w.task_deadline,
+            handshake = w.handshake,
+            current_task_id_reported = w.current_task_id,
+        }
+    end
+    local queue = {}
+    for i, tid in ipairs(self.queue) do queue[i] = tid end
+    return {
+        version = 2,
+        transport_mode = self.transport_mode,
+        seq = seq,
+        rrCursor = self._rrCursor,
+        tasks = tasks,
+        queue = queue,
+        workers = workers,
+        reservations = self.storage and self.storage:reservationSummary() or {},
+    }
+end
+
+function dispatcher:save()
+    if not self._dirty and (now() - self._lastSave) < 1 then return true end
+    local data = self:serialize()
+    local ok, err = util.saveData(self._persistencePath, data)
+    if ok then
+        self._dirty = false
+        self._lastSave = now()
+        return true
+    end
+    util.warn("Could not save queue state: " .. tostring(err))
+    return false, err
+end
+
+function dispatcher:load()
+    if not util.fileExists(self._persistencePath) then return false end
+    local data = util.loadData(self._persistencePath, {})
+    if type(data) ~= "table" then return false, "bad state" end
+    if type(data.transport_mode) == "string" then self.transport_mode = data.transport_mode end
+    if type(data.rrCursor) == "number" then self._rrCursor = data.rrCursor end
+    if type(data.seq) == "number" then seq = data.seq end
+    if type(data.tasks) == "table" then
+        self.tasks = data.tasks
+    end
+    if type(data.queue) == "table" then
+        self.queue = data.queue
+    end
+    if type(data.workers) == "table" then
+        self.workers = {}
+        for id, w in pairs(data.workers) do
+            local wid = tonumber(id) or id
+            self.workers[wid] = workerState(now())
+            for k, v in pairs(w) do self.workers[wid][k] = v end
+            if self.workers[wid].current_task_id then
+                local task = self.tasks[self.workers[wid].current_task_id]
+                self.workers[wid].current_task = task
+            end
+        end
+    end
+    return true
+end
+
+----------------------------------------------------------------
+-- TASK HELPERS
+----------------------------------------------------------------
+
 function dispatcher:queueTask(recipe, count, stepInfo)
     local task = {
         id = newTaskId(),
@@ -148,273 +300,80 @@ function dispatcher:queueTask(recipe, count, stepInfo)
         step = stepInfo,
         progress = 0,
         result = nil,
+        dependencies = {},
+        dependents = {},
+        worker_id = nil,
+        batch_index = 1,
+        batch_total = 1,
+        reservation_id = nil,
+        plan = nil,
+        task_type = recipe and recipe.type or "craft",
+        created_at = now(),
+        updated_at = now(),
+        requested = count,
+        acked = false,
+        ack_attempts = 0,
+        ack_deadline = 0,
+        sent_at = 0,
     }
     self.tasks[task.id] = task
-    table.insert(self.queue, task.id)
-    emit(self, "task_queued", { id = task.id, recipe = recipe.id, count = count })
+    self.queue[#self.queue + 1] = task.id
+    self._dirty = true
+    emit(self, "task_queued", { id = task.id, recipe = recipe and recipe.id or nil, count = count })
     return task.id
 end
 
 function dispatcher:requeue(task, reason)
+    if not task or task.status == "done" or task.status == "failed" then return end
     task.status = "queued"
     task.worker_id = nil
-    table.insert(self.queue, task.id)
+    task.updated_at = now()
+    task.sent_at = 0
+    task.acked = false
+    task.ack_attempts = 0
+    task.ack_deadline = 0
+    if not listContains(self.queue, task.id) then
+        self.queue[#self.queue + 1] = task.id
+    end
+    self._dirty = true
     emit(self, "task_requeued", { id = task.id, reason = reason or "unknown" })
 end
 
---- Отменить активную задачу.
--- Если задача выполняется на воркере, шлёт net.MSG.CRAFT_CANCEL.
--- Помечает задачу как failed и отменяет зависимые задачи.
 function dispatcher:cancelTask(taskId, reason)
     reason = reason or "Cancelled by user"
     local task = self.tasks[taskId]
-    if not task then
-        return false, "Task not found"
+    if not task then return false, "Task not found" end
+    if task.status == "done" or task.status == "failed" then return false, "Task already finished" end
+    if task.reservation_id and self.storage then
+        self.storage:release(task.reservation_id)
+        task.reservation_id = nil
     end
-    
-    if task.status == "done" or task.status == "failed" then
-        return false, "Task already finished"
+    if task.worker_id and self.workers[task.worker_id] then
+        local w = self.workers[task.worker_id]
+        pcall(function()
+            net.send(task.worker_id, net.MSG.CANCEL, { task_id = taskId, reason = reason })
+        end)
+        w.state = "free"
+        w.current_task = nil
+        w.busy = false
+        w.task_started_at = nil
+        w.task_deadline = nil
+        w.current_task_id = nil
     end
-    
-    -- Если назначена воркеру, шлём отмену и освобождаем его
-    if task.worker_id then
-        if task.worker_id ~= "machine" then
-            local w = self.workers[task.worker_id]
-            if w and w.current_task and w.current_task.id == taskId then
-                pcall(function()
-                    net.send(task.worker_id, net.MSG.CRAFT_CANCEL, { task_id = taskId })
-                end)
-                self:collectResult(task.worker_id)
-                w.state = "free"
-                w.current_task = nil
-                w.task_started_at = nil
-                w.task_deadline = nil
-            end
-        end
-    end
-    
-    -- Удаляем из очереди
-    for i, qid in ipairs(self.queue) do
-        if qid == taskId then
-            table.remove(self.queue, i)
-            break
-        end
-    end
-    
+    removeValue(self.queue, taskId)
     task.status = "failed"
-    task.result = reason
+    task.result = { success = false, error = reason }
+    task.updated_at = now()
+    self._dirty = true
     emit(self, "task_failed", { id = taskId, error = reason })
-    self:failDependents(taskId, reason)
-    
     return true
-end
-
---- Подготовить ингредиенты: extract из хранилища ПРЯМО в инвентарь черепахи.
--- Слоты черепахи, которые НЕ являются частью крафтовой сетки.
--- GRID = {1,2,3,5,6,7,9,10,11}  →  свободные = {4,8,12,13,14,15,16}
-local TURTLE_EXTRA_SLOTS = {4, 8, 12, 13, 14, 15, 16}
-
-function dispatcher:prepareIngredients(workerId, task)
-    local turtleName = self:workerName(workerId)
-    if not turtleName then
-        return false, "Worker #" .. tostring(workerId) .. " not found on the wired network"
-    end
-    local p = peripheral.wrap(turtleName)
-    if not p then
-        return false, "Turtle #"..tostring(workerId).." is not reachable. Connect the turtle to a WIRED modem and ENABLE it (right-click the modem, it must glow red)."
-    end
-
-    -- W3.1: ВСЕГДА убедиться, что черепаха чистая и EXTRA-слоты пусты.
-    -- Не полагаемся только на условную очистку: если deposit не смог всё
-    -- выгрузить, освежаем пустые слоты хранилища и повторяем.
-    local function turtleHasItems()
-        local okL, list = pcall(p.list)
-        return okL and list and next(list) ~= nil
-    end
-    if turtleHasItems() then
-        self:collectResult(workerId)
-        if turtleHasItems() then
-            -- deposit не смог всё выгрузить -> освежить пустые слоты и повторить
-            self.storage:refreshEmptySlots()
-            self:collectResult(workerId)
-            if turtleHasItems() then
-                -- Y4: различаем "хранилище забито" и "черепаха заблокирована".
-                local free = self.storage:refreshEmptySlots()
-                if not free or #free == 0 then
-                    return false, "Storage full: no free slots to offload turtle before crafting"
-                end
-                return false, "Turtle blocked: could not clear inventory before crafting (items stuck in turtle)"
-            end
-        end
-    end
-
-    -- Собираем уникальные ID ингредиентов и сколько каждого нужно
-    local ings = recipes.ingredientsFor(task.recipe, task.count)
-
-    -- W3.2: пул свободных EXTRA-слотов. Каждому ингредиенту перебираем слоты
-    -- пула ПО ОДНОМУ и зовём extract со СКАЛЯРНЫМ номером слота (один integer).
-    -- НИКОГДА не кладём в GRID и не в nil (иначе сломаем раскладку воркера).
-    local freePool = {}
-    for _, s in ipairs(TURTLE_EXTRA_SLOTS) do
-        freePool[#freePool + 1] = s
-    end
-
-    -- Зафиксировать реально занятые EXTRA-слоты черепахи и убрать их из пула.
-    local function syncPool()
-        local kept = {}
-        for _, s in ipairs(freePool) do
-            local cnt = 0
-            local okC, c = pcall(p.getItemCount, s)
-            if okC and c then cnt = c end
-            if cnt == 0 then kept[#kept + 1] = s end
-        end
-        freePool = kept
-    end
-
-    local prepared = 0
-    for _, ing in ipairs(ings) do
-        local remaining = ing.count
-        -- Кладём в свободные EXTRA-слоты ПО ОДНОМУ: extract получает ОДИН
-        -- integer-слот за вызов. Если в слот влез не весь стак (лимит 64),
-        -- остаток уходит в следующий свободный EXTRA-слот.
-        syncPool()  -- актуализировать freePool по факту
-        local poolIdx = 1
-        while remaining > 0 and poolIdx <= #freePool do
-            local slot = freePool[poolIdx]               -- ОДИН номер слота
-            local got = self.storage:extract(ing.id, remaining, turtleName, slot)
-            remaining = remaining - got
-            poolIdx = poolIdx + 1
-        end
-
-        if remaining > 0 then
-            -- W3.3: различаем причину недобора и пишем ПРАВДИВУЮ ошибку.
-            local have = self.storage:count(ing.id)
-            if have < ing.count then
-                self:collectResult(workerId)
-                return false, string.format("Not enough %s: need %d, have %d",
-                    lang.localize(ing.id), ing.count, have)
-            end
-
-            -- Предмет есть, но не лёг -> кэш протух ИЛИ слот занят.
-            -- Пересканировать, освежить пустые слоты и ПОВТОРИТЬ один раз по слотам.
-            self.storage:rescanItem(ing.id)
-            self.storage:refreshEmptySlots()
-            syncPool()
-            poolIdx = 1
-            while remaining > 0 and poolIdx <= #freePool do
-                local slot = freePool[poolIdx]
-                local got = self.storage:extract(ing.id, remaining, turtleName, slot)
-                remaining = remaining - got
-                poolIdx = poolIdx + 1
-            end
-            if remaining > 0 then
-                self:collectResult(workerId)
-                return false, string.format("Could not move %s into %s (no free EXTRA slot / cache stale)",
-                    lang.localize(ing.id), turtleName)
-            end
-        end
-
-        -- Обновляем пул: выкинуть EXTRA-слоты, которые теперь заняты.
-        syncPool()
-        prepared = prepared + 1
-    end
-
-    -- Z1: ФИЗИЧЕСКАЯ проверка раскладки. extract мог декрементировать счётчик,
-    -- но предмет физически НЕ попал в черепаху (чужой слот, баг учёта, частичный
-    -- перенос). Никогда не отправляем крафт с недокомплектом: считаем реальное
-    -- содержимое инвентаря черепахи и сверяем с потребностью.
-    do
-        local present = {}
-        local okL, list = pcall(p.list)
-        if okL and list then
-            for _, item in pairs(list) do
-                if item and item.name then
-                    present[item.name] = (present[item.name] or 0) + (item.count or 0)
-                end
-            end
-        end
-        for _, ing in ipairs(ings) do
-            local have = present[ing.id] or 0
-            if have < ing.count then
-                -- Чего-то не доехало физически -> полностью очистить черепаху
-                -- (вернуть в хранилище уже доехавшие ингредиенты) и честно упасть.
-                self:collectResult(workerId)
-                local okL2, list2 = pcall(p.list)
-                if okL2 and list2 and next(list2) ~= nil then
-                    self.storage:refreshEmptySlots()
-                    self:collectResult(workerId)
-                end
-                return false, string.format(
-                    "Ingredient layout incomplete: %s need %d, only %d reached turtle (task aborted, turtle cleared)",
-                    lang.localize(ing.id), ing.count, have)
-            end
-        end
-    end
-
-    -- X3: диагностика — куда фактически лёг каждый ингредиент (slot=count).
-    do
-        local parts = {}
-        for _, s in ipairs(TURTLE_EXTRA_SLOTS) do
-            local okC, c = pcall(p.getItemCount, s)
-            if okC and c and c > 0 then
-                parts[#parts + 1] = string.format("%d=%d", s, c)
-            end
-        end
-        util.debug(string.format("EXTRA slots for %s after prepare: %s",
-            turtleName, (#parts > 0 and table.concat(parts, " ") or "(empty)")), true)
-    end
-    util.info(string.format("Prepared %d ingredient(s) for task %s -> %s",
-        prepared, tostring(task.id), turtleName), true)
-    return true
-end
-
---- Забрать ВСЕ предметы из инвентаря черепахи в хранилище (результат + остатки).
-function dispatcher:collectResult(workerId)
-    local turtleName = self:workerName(workerId)
-    if not turtleName then return 0, 0 end
-    local p = peripheral.wrap(turtleName)
-    if not p or not p.list then return 0, 0 end
-    local ok, list = pcall(p.list)
-    if not ok or not list then return 0, 0 end
-    local total = 0
-    local refreshed = false
-    for slot, _ in pairs(list) do  -- только реально занятые слоты
-        local moved = self.storage:deposit(turtleName, slot, nil)
-        if moved == 0 then
-            -- Y3: непустой слот не принят -> кэш пустых слотов мог протухнуть.
-            -- Освежить ОДИН раз и повторить этот слот.
-            if not refreshed then
-                self.storage:refreshEmptySlots()
-                refreshed = true
-            end
-            moved = self.storage:deposit(turtleName, slot, nil)
-        end
-        total = total + moved
-    end
-    -- Сколько реально осталось в черепахе после выгрузки.
-    local leftover = 0
-    local okL, list2 = pcall(p.list)
-    if okL and list2 then
-        for _, item in pairs(list2) do
-            leftover = leftover + (item.count or 0)
-        end
-    end
-    if leftover > 0 then
-        util.warn(string.format("Storage full: could not offload %d items from %s",
-            leftover, turtleName))
-    end
-    return total, leftover
 end
 
 function dispatcher:isTaskReady(task)
-    if not task.dependencies or #task.dependencies == 0 then
-        return true
-    end
+    if not task.dependencies or #task.dependencies == 0 then return true end
     for _, depId in ipairs(task.dependencies) do
         local depTask = self.tasks[depId]
-        if not depTask or depTask.status ~= "done" then
-            return false
-        end
+        if not depTask or depTask.status ~= "done" then return false end
     end
     return true
 end
@@ -426,327 +385,10 @@ function dispatcher:failDependents(failedTaskId, reason)
                 if depId == failedTaskId then
                     task.status = "failed"
                     task.result = "Dependency task " .. failedTaskId .. " failed: " .. tostring(reason)
-                    -- Remove from queue
-                    for i, qid in ipairs(self.queue) do
-                        if qid == task.id then
-                            table.remove(self.queue, i)
-                            break
-                        end
-                    end
+                    removeValue(self.queue, task.id)
                     emit(self, "task_failed", { id = task.id, error = task.result })
                     self:failDependents(task.id, reason)
                     break
-                end
-            end
-        end
-    end
-end
-
---- Один тик планировщика.
-function dispatcher:tick()
-    -- Y3: retry offloading any workers left "draining" (storage was full when
-    -- their result came back). When fully drained, return them to the free pool.
-    for id, w in pairs(self.workers) do
-        if w.state == "draining" then
-            local _, leftover = self:collectResult(id)
-            if (leftover or 0) <= 0 then
-                w.state = "free"
-                util.info("Worker #" .. tostring(id) .. " drained, back to free pool")
-                pcall(os.queueEvent, "shellcraft_dispatch")
-            end
-        end
-    end
-
-    if #self.queue == 0 then return end
-
-    -- 1. Обработать ready-задачи типа "machine"/"station" (без участия воркеров)
-    local i = 1
-    while i <= #self.queue do
-        local tid = self.queue[i]
-        local task = self.tasks[tid]
-        if task and task.status == "queued" and self:isTaskReady(task) and (task.recipe.type == "machine" or task.recipe.type == "station") then
-            -- Avoid double craft: if requeued task's output is already in storage, skip
-            local skip = false
-            if task.attempts > 0 and task.recipe and task.recipe.id then
-                local have = self.storage:count(task.recipe.id)
-                if have >= task.count then
-                    util.info("Task " .. task.id .. " already fulfilled (have " .. have .. "), marking done")
-                    task.status = "done"
-                    task.result = { success = true, count = task.count, skipped = true }
-                    emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = task.count })
-                    table.remove(self.queue, i)
-                    skip = true
-                end
-            end
-
-            if not skip then
-                if not self.machines then
-                    task.status = "failed"
-                    task.result = "machine module not connected"
-                    emit(self, "task_failed", { id = task.id, error = task.result })
-                    self:failDependents(task.id, task.result)
-                    table.remove(self.queue, i)
-                else
-                    local jobId, err = self.machines:submit(task.recipe, task.count, function(success, res, elapsed, cycles)
-                        if success then
-                            -- Обновляем avgTime рецепта (время на 1 цикл машины)
-                            if self.recipes and elapsed and cycles and cycles > 0 then
-                                self.recipes:updateTiming(task.recipe.id, elapsed / cycles)
-                            end
-                            task.status = "done"
-                            task.result = { success = true, count = res }
-                            emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = res })
-                        else
-                            task.status = "failed"
-                            task.result = { success = false, error = res }
-                            emit(self, "task_failed", { id = task.id, error = tostring(res) })
-                            self:failDependents(task.id, tostring(res))
-                        end
-                    end)
-                    if jobId then
-                        task.status = "running"
-                        task.worker_id = "machine"
-                        emit(self, "task_started", { id = task.id, worker = "machine", recipe = task.recipe.id, count = task.count })
-                        table.remove(self.queue, i)
-                    else
-                        -- Если нет свободной машины, оставляем в очереди (не удаляем), пробуем в следующий раз
-                        i = i + 1
-                    end
-                end
-            end
-        else
-            i = i + 1
-        end
-    end
-
-    -- 2. Раздать крафт черепахам: всем свободным, пока есть готовые задачи
-    local triedTaskThisTick = {}  -- защита от повторного выбора той же задачи в этом тике
-    local dispatchedThisTick = 0
-
-    while true do
-        local workerId = self:findFree()
-        if not workerId then break end  -- нет свободных черепах
-
-        -- найти следующую готовую крафт-задачу, которую ещё не пробовали в этом тике
-        local readyIdx, task = nil, nil
-        for j, tid in ipairs(self.queue) do
-            local t = self.tasks[tid]
-            if t and t.status == "queued" and not triedTaskThisTick[tid]
-                and self:isTaskReady(t)
-                and (t.recipe.type == "shaped" or t.recipe.type == "shapeless") then
-                readyIdx, task = j, t
-                break
-            end
-        end
-        if not task then break end  -- готовых задач больше нет
-
-        table.remove(self.queue, readyIdx)
-        triedTaskThisTick[task.id] = true
-
-        -- Avoid double craft: if requeued task's output is already in storage, skip
-        if task.attempts > 0 and task.recipe and task.recipe.id
-            and self.storage:count(task.recipe.id) >= task.count then
-            util.info("Task " .. task.id .. " already fulfilled (have " .. self.storage:count(task.recipe.id) .. "), marking done")
-            task.status = "done"
-            task.result = { success = true, count = task.count, skipped = true }
-            emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = task.count })
-            -- НЕ выходим из цикла — берём следующую задачу
-        else
-            -- Обычный крафт черепахой
-            local ok, err = self:prepareIngredients(workerId, task)
-            if not ok then
-                task.attempts = task.attempts + 1
-                if task.attempts >= self.maxAttempts then
-                    task.status = "failed"
-                    task.result = err
-                    emit(self, "task_failed", { id = task.id, error = err })
-                    self:failDependents(task.id, err)
-                else
-                    table.insert(self.queue, task.id)  -- вернуть в очередь
-                    emit(self, "task_retry", { id = task.id, error = err })
-                end
-                -- ВАЖНО: НЕ return и НЕ break — берём следующего воркера/задачу.
-            else
-                local w = self.workers[workerId]
-                w.state = "busy"
-                w.current_task = task
-                w.task_started_at = os.clock()  -- per-task deadline start (heartbeat does NOT reset this)
-                -- Dynamic deadline: based on avgTime if available, otherwise fallback
-                local crafts = math.ceil(task.count / (task.recipe.output or 1))
-                local avgTime = task.recipe.avgTime or 5
-                w.task_deadline = math.max(60, avgTime * crafts * 3)
-                task.status = "running"
-                task.worker_id = workerId
-                task.attempts = task.attempts + 1
-                net.send(workerId, net.MSG.CRAFT_REQUEST, {
-                    recipe = task.recipe,
-                    count = task.count,
-                    task_id = task.id,
-                })
-                emit(self, "task_started", { id = task.id, worker = workerId, recipe = task.recipe.id, count = task.count })
-            end
-        end
-
-        -- Йилд, чтобы UI/сеть не лагали при раздаче многим воркерам за один тик
-        dispatchedThisTick = dispatchedThisTick + 1
-        if dispatchedThisTick % 4 == 0 then
-            os.sleep(0)
-        end
-    end
-end
-
-
---- Обработать входящее сообщение (вызывается сервером).
-function dispatcher:handleMessage(senderId, msg)
-    if not msg or not msg.type then return end
-    if msg.type == net.MSG.WORKER_HELLO then
-        self:addWorker(senderId, msg.payload)
-        -- Send a discover back only if the worker does not have our Core ID registered to prevent recursive loop
-        local p = msg.payload or {}
-        if p.core ~= os.getComputerID() then
-            net.send(senderId, net.MSG.DISCOVER, { core = os.getComputerID() })
-        end
-    elseif msg.type == net.MSG.WORKER_BYE then
-        self:removeWorker(senderId)
-    elseif msg.type == net.MSG.STATUS then
-        local p = msg.payload or {}
-        local w = self.workers[senderId]
-        if w and w.current_task and w.current_task.id == p.task_id then
-            w.current_task.progress = p.progress or w.current_task.progress
-            emit(self, "task_progress", { id = p.task_id, progress = p.progress })
-        end
-    elseif msg.type == net.MSG.RESULT then
-        local p = msg.payload or {}
-        local w = self.workers[senderId]
-        -- Normal path: worker's current_task matches the result
-        local task = nil
-        if w and w.current_task and w.current_task.id == p.task_id then
-            task = w.current_task
-        elseif p.task_id and self.tasks[p.task_id] then
-            -- Orphaned RESULT recovery: current_task was nil'd (e.g. by stale heartbeat requeue)
-            -- but the task still exists — accept the result to avoid wasted work
-            local orphan = self.tasks[p.task_id]
-            if orphan.status == "running" or orphan.status == "queued" then
-                util.info("Recovering orphaned RESULT for task " .. p.task_id .. " from worker #" .. tostring(senderId))
-                task = orphan
-                -- Remove from queue if it was requeued
-                for i, qid in ipairs(self.queue) do
-                    if qid == p.task_id then
-                        table.remove(self.queue, i)
-                        break
-                    end
-                end
-            end
-        end
-        if task then
-            local leftover = 0
-            if p.success then
-                local _, lo = self:collectResult(senderId)
-                leftover = lo or 0
-                task.status = "done"
-                task.result = p
-                -- Обновляем avgTime рецепта (время на 1 крафт черепахи)
-                if self.recipes and p.elapsed and p.crafts and p.crafts > 0 then
-                    self.recipes:updateTiming(task.recipe.id, p.elapsed / p.crafts)
-                end
-                emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = p.count })
-            else
-                -- При ошибке тоже забираем остатки
-                local _, lo = self:collectResult(senderId)
-                leftover = lo or 0
-                task.status = "failed"
-                task.result = p
-                local err = p.error or "worker returned error"
-                emit(self, "task_failed", { id = task.id, error = err })
-                self:failDependents(task.id, err)
-            end
-            -- Free the worker (only if this worker was assigned to the task)
-            if w then
-                w.current_task = nil
-                w.task_started_at = nil
-                w.task_deadline = nil
-                if leftover > 0 then
-                    -- Y3: storage could not absorb everything -> turtle still holds
-                    -- items. Keep it "draining" (not dispatchable) and retry the
-                    -- offload on the next tick instead of silently continuing.
-                    w.state = "draining"
-                    util.warn(string.format("Worker #%s left draining: %d items still onboard (storage full?)",
-                        tostring(senderId), leftover))
-                else
-                    w.state = "free"
-                end
-                -- Событийная побудка планировщика: дораздать задачу освободившейся черепахе сразу
-                pcall(os.queueEvent, "shellcraft_dispatch")
-            end
-        end
-    elseif msg.type == net.MSG.HEARTBEAT then
-        local w = self.workers[senderId]
-        if w then
-            w.last_seen = os.clock()
-            local p = msg.payload or {}
-            if p.busy == false and w.state == "busy" then
-                local now = os.clock()
-                local taskAge = w.task_started_at and (now - w.task_started_at) or 999
-                local taskId = w.current_task and w.current_task.id
-                local reportedId = p.current_task_id
-                -- If worker reports the SAME task_id as assigned, it's just a stale busy flag — ignore
-                if reportedId and reportedId == taskId then
-                    -- Worker is working on our task but crafting flag not yet set; ignore
-                elseif taskAge < self.heartbeat_grace then
-                    -- Within grace period after dispatch — stale heartbeat, ignore
-                    util.info("Stale heartbeat from #" .. tostring(senderId) .. " (task assigned " .. math.floor(taskAge) .. "s ago < grace " .. self.heartbeat_grace .. "s), ignoring")
-                else
-                    -- Grace expired AND worker truly reports idle for a different/no task — safe to reset
-                    util.warn("Worker #" .. tostring(senderId) .. " confirmed idle after grace (" .. math.floor(taskAge) .. "s), requeuing task")
-                    if w.current_task then
-                        self:requeue(w.current_task, "stale_heartbeat")
-                    end
-                    w.state = "free"
-                    w.current_task = nil
-                    w.task_started_at = nil
-                    w.task_deadline = nil
-                end
-            end
-        end
-    end
-end
-
---- Проверить зависших воркеров.
--- Два независимых таймаута:
---   1) Worker liveness: если heartbeat не приходил дольше `timeout` — воркер мёртв
---   2) Per-task deadline: динамический (w.task_deadline) или self.task_timeout как fallback
--- Heartbeat обновляет ТОЛЬКО last_seen, НЕ продлевает task_started_at.
-function dispatcher:checkTimeouts(timeout)
-    timeout = timeout or 60
-    local now = os.clock()
-    for id, w in pairs(self.workers) do
-        if w.state == "busy" then
-            -- 1) Worker liveness: heartbeat не приходил слишком долго
-            if (now - (w.last_seen or now)) > timeout then
-                util.warn("Worker #" .. id .. " not responding (no heartbeat for " .. timeout .. "s), returning task to queue")
-                if w.current_task then
-                    emit(self, "task_timeout", { id = w.current_task.id, worker = id, reason = "worker_dead" })
-                    self:requeue(w.current_task, "worker_dead")
-                end
-                w.state = "free"
-                w.current_task = nil
-                w.task_started_at = nil
-                w.task_deadline = nil
-            -- 2) Per-task deadline: dynamic or fallback
-            elseif w.task_started_at then
-                local deadline = w.task_deadline or self.task_timeout
-                local elapsed = now - w.task_started_at
-                if elapsed > deadline then
-                    local elapsedInt = math.floor(elapsed)
-                    util.warn("Task on worker #" .. id .. " exceeded deadline (" .. elapsedInt .. "s > " .. math.floor(deadline) .. "s), returning to queue")
-                    if w.current_task then
-                        emit(self, "task_timeout", { id = w.current_task.id, worker = id, reason = "task_deadline", elapsed = elapsedInt })
-                        self:requeue(w.current_task, "task_deadline")
-                    end
-                    w.state = "free"
-                    w.current_task = nil
-                    w.task_started_at = nil
-                    w.task_deadline = nil
                 end
             end
         end
@@ -757,128 +399,756 @@ function dispatcher:activeTasks()
     local arr = {}
     for _, task in pairs(self.tasks) do
         if task.status == "running" or task.status == "queued" then
-            table.insert(arr, task)
+            arr[#arr + 1] = task
         end
-    end
-    return arr
-end
-
-function dispatcher:allTasks()
-    local arr = {}
-    for _, task in pairs(self.tasks) do
-        table.insert(arr, task)
     end
     table.sort(arr, function(a, b) return a.id < b.id end)
     return arr
 end
 
-local SLOT = 64
-local MAX_OUT_ITEMS = 8 * SLOT   -- не больше 8 слотов под выход
-local MAX_IN_ITEMS  = 4 * SLOT   -- не больше 4 слотов под вход
-
-function dispatcher:batchCrafts(recipe)
-    local out = recipe.output or 1
-    local inPer = recipes.itemsPerCraft(recipe)
-    local byOut = math.floor(MAX_OUT_ITEMS / math.max(1, out))
-    local byIn  = inPer > 0 and math.floor(MAX_IN_ITEMS / inPer) or byOut
-    local byChunk = math.floor(SLOT / math.max(1, out))
-    if byChunk < 1 then byChunk = 1 end
-    return math.max(1, math.min(byOut, byIn, byChunk))   -- макс. крафтов в одной задаче
+function dispatcher:allTasks()
+    local arr = {}
+    for _, task in pairs(self.tasks) do arr[#arr + 1] = task end
+    table.sort(arr, function(a, b) return a.id < b.id end)
+    return arr
 end
 
---- Запрос крафта: строит план, ставит шаги в очередь.
--- @param id ID предмета
--- @param count сколько
--- @param recipes объект recipes
--- @return task_ids список, либо nil + сообщение об ошибке
-function dispatcher:requestCraft(id, count, recipes)
-    if not recipes:has(id) then
-        return nil, "No recipe for " .. lang.localize(id)
+function dispatcher:batchCrafts(recipe)
+    local out = recipe and recipe.output or 1
+    local inPer = recipes.itemsPerCraft(recipe)
+    local byOut = math.floor(64 / math.max(1, out))
+    local byIn = inPer > 0 and math.floor(64 / math.max(1, inPer)) or byOut
+    return math.max(1, math.min(byOut, byIn))
+end
+
+----------------------------------------------------------------
+-- BUFFER / WIREDED TRANSFER HELPERS
+----------------------------------------------------------------
+
+local function turtleHasCraftingTable()
+    return type(turtle) == "table" and type(turtle.craft) == "function"
+end
+
+local function turtleInventoryFullCheck()
+    for s = 1, 16 do
+        if turtle.getItemCount(s) == 0 then return false end
     end
-    local tree = planner.buildTree(id, count, recipes, self.storage, self.fluids)
+    return true
+end
+
+local function clearTurtle()
+    local moved = 0
+    for s = 1, 16 do
+        if turtle.getItemCount(s) > 0 then
+            turtle.select(s)
+            if turtle.drop() or turtle.dropUp() or turtle.dropDown() then
+                moved = moved + 1
+            end
+        end
+    end
+    return moved
+end
+
+function dispatcher:resolveWorkerBuffers(workerId)
+    local cfg = config.load()
+    local workerCfg = type(cfg.workers) == "table" and cfg.workers[workerId] or nil
+    if type(workerCfg) == "table" and workerCfg.input and workerCfg.output then
+        return workerCfg.input, workerCfg.output
+    end
+    if cfg.worker_buffers and cfg.worker_buffers[workerId] then
+        local pair = cfg.worker_buffers[workerId]
+        if type(pair) == "table" then return pair.input, pair.output end
+    end
+    if cfg.transfer_mode == "buffer" then
+        local manual = cfg.peripherals or {}
+        if type(manual.buffer_inputs) == "table" and type(manual.buffer_outputs) == "table" then
+            local idx = 1 + ((workerId - 1) % math.max(1, math.min(#manual.buffer_inputs, #manual.buffer_outputs)))
+            return manual.buffer_inputs[idx], manual.buffer_outputs[idx]
+        end
+    end
+    return nil, nil
+end
+
+function dispatcher:workerSupportsWired(workerId)
+    local name = self:workerName(workerId)
+    if not name then return false, "Worker not visible on wired network" end
+    local p = peripheral.wrap(name)
+    if not p then return false, "Worker peripheral unavailable" end
+    return true
+end
+
+function dispatcher:prepareBufferTask(workerId, task)
+    local cfg = config.load()
+    local inputChest, outputChest = self:resolveWorkerBuffers(workerId)
+    if not inputChest or not outputChest then
+        return false, "No buffer chests assigned for worker #" .. tostring(workerId) ..
+            "; set config.workers[" .. tostring(workerId) .. "] = { input = ..., output = ... }"
+    end
+    if not peripheral.isPresent(inputChest) then
+        return false, "Input buffer '" .. tostring(inputChest) .. "' is not present"
+    end
+    if not peripheral.isPresent(outputChest) then
+        return false, "Output buffer '" .. tostring(outputChest) .. "' is not present"
+    end
+    local inputP = peripheral.wrap(inputChest)
+    if not inputP or type(inputP.pushItems) ~= "function" or type(inputP.pullItems) ~= "function" then
+        return false, "Input buffer '" .. tostring(inputChest) .. "' is not a container"
+    end
+    local outputP = peripheral.wrap(outputChest)
+    if not outputP or type(outputP.pushItems) ~= "function" or type(outputP.pullItems) ~= "function" then
+        return false, "Output buffer '" .. tostring(outputChest) .. "' is not a container"
+    end
+    return true, { input = inputChest, output = outputChest }
+end
+
+function dispatcher:prepareWiredTask(workerId, task)
+    local turtleName = self:workerName(workerId)
+    if not turtleName then
+        return false, "Worker #" .. tostring(workerId) .. " not found on wired network"
+    end
+    local p = peripheral.wrap(turtleName)
+    if not p then
+        return false, "Worker #" .. tostring(workerId) .. " is not reachable on wired network"
+    end
+    return true, { turtle = turtleName, peripheral = p }
+end
+
+function dispatcher:countRequirementForTask(task)
+    if not task.plan or not task.plan.items then return {} end
+    local req = {}
+    for _, ing in ipairs(task.plan.items) do
+        req[ing.id] = (req[ing.id] or 0) + (ing.count or 0)
+    end
+    return req
+end
+
+function dispatcher:reserveForTask(task, tree)
+    if not self.storage then return true end
+    if task.reservation_id then return true end
+    local bom = planner.bom(tree)
+    local reservations = {}
+    for id, count in pairs(bom.items) do
+        local needed = count or 0
+        if needed > 0 then
+            local avail = self.storage:available(id)
+            if avail < needed then
+                local missing = needed - avail
+                return false, string.format("Not enough %s: need %d, available %d, missing %d", lang.display(id), needed, avail, missing)
+            end
+            local rid = self.storage:reserve(id, needed, task.id)
+            reservations[#reservations + 1] = rid
+        end
+    end
+    task.reservation_id = reservations[1] or false
+    task._reservations = reservations
+    return true
+end
+
+function dispatcher:releaseTaskReservations(task)
+    if not task or not self.storage then return 0 end
+    local released = 0
+    if task._reservations then
+        for _, rid in ipairs(task._reservations) do
+            released = released + self.storage:release(rid)
+        end
+    elseif task.reservation_id then
+        released = released + self.storage:release(task.reservation_id)
+    end
+    task.reservation_id = nil
+    task._reservations = nil
+    return released
+end
+
+----------------------------------------------------------------
+-- TASK PLANNING
+----------------------------------------------------------------
+
+local function flattenTree(node, arr)
+    arr = arr or {}
+    if not node then return arr end
+    if node.has_recipe then
+        for _, child in ipairs(node.children or {}) do flattenTree(child, arr) end
+        arr[#arr + 1] = node
+    end
+    return arr
+end
+
+function dispatcher:enqueueTree(root)
+    local nodes = flattenTree(root, {})
+    local tasks = {}
+    local nodeToTask = {}
+
+    for _, node in ipairs(nodes) do
+        local crafts = node.crafts or recipes.craftsNeeded(node.recipe, node.count)
+        local task = {
+            id = newTaskId(),
+            recipe = node.recipe,
+            count = node.count,
+            crafts = crafts,
+            requested = node.count,
+            status = "queued",
+            attempts = 0,
+            step = nil,
+            progress = 0,
+            result = nil,
+            dependencies = {},
+            dependents = {},
+            worker_id = nil,
+            batch_index = 1,
+            batch_total = 1,
+            reservation_id = nil,
+            plan = nil,
+            task_type = node.recipe and node.recipe.type or "craft",
+            created_at = now(),
+            updated_at = now(),
+            node = node,
+        }
+        tasks[#tasks + 1] = task
+        self.tasks[task.id] = task
+        nodeToTask[node] = task.id
+    end
+
+    -- Build dependencies by tree edges.
+    local function link(node)
+        local tid = nodeToTask[node]
+        local task = self.tasks[tid]
+        if not task then return end
+        for _, child in ipairs(node.children or {}) do
+            if child.has_recipe then
+                local depId = nodeToTask[child]
+                if depId then
+                    task.dependencies[#task.dependencies + 1] = depId
+                    local dep = self.tasks[depId]
+                    dep.dependents[#dep.dependents + 1] = tid
+                end
+                link(child)
+            end
+        end
+    end
+    link(root)
+
+    for _, task in ipairs(tasks) do
+        self.queue[#self.queue + 1] = task.id
+    end
+    self._dirty = true
+    return tasks
+end
+
+function dispatcher:prepareCraftPlan(tree)
+    local steps = planner.craftSteps(tree)
+    return steps
+end
+
+function dispatcher:requestCraft(id, count, recipesObj)
+    recipesObj = recipesObj or self.recipes
+    if not recipesObj then return nil, "recipes module missing" end
+    local recipe = recipesObj:get(id)
+    if not recipe then
+        return nil, "No recipe for " .. lang.display(id)
+    end
+
+    local tree = planner.buildTree(id, count, recipesObj, self.storage, self.fluids)
     local can, avail = planner.canCraft(tree, self.storage, self.fluids)
     if not can then
         local missing = {}
         for mid, info in pairs(avail.items) do
             if info.missing > 0 then
-                table.insert(missing, lang.localize(mid) .. " (need " .. info.needed .. ", have " .. info.available .. ", missing " .. info.missing .. ")")
+                missing[#missing + 1] = string.format("%s (need %d, have %d, missing %d)", lang.display(mid), info.needed, info.available, info.missing)
             end
         end
-        for mfluid, info in pairs(avail.fluids) do
+        for f, info in pairs(avail.fluids) do
             if info.missing > 0 then
-                table.insert(missing, lang.localize("fluid:" .. mfluid) .. " (need " .. info.needed .. "mB, have " .. info.available .. "mB, missing " .. info.missing .. "mB)")
+                missing[#missing + 1] = string.format("%s (need %dmB, have %dmB, missing %dmB)", lang.display("fluid:" .. f), info.needed, info.available, info.missing)
             end
         end
         return nil, "Missing resources: " .. table.concat(missing, "; ")
     end
 
+    local steps = planner.craftSteps(tree)
     local taskIds = {}
-    local nodeToTaskIds = {}
+    local prevTaskId = nil
+    local batchMap = {}
 
-    local function createTasks(node)
-        if not node or not node.has_recipe then return nil end
-        if nodeToTaskIds[node] then return nodeToTaskIds[node] end
+    for _, step in ipairs(steps) do
+        local stepRecipe = step.recipe
+        local totalResult = step.count
+        local output = stepRecipe.output or 1
+        local totalCrafts = math.ceil(totalResult / output)
+        local batch = self:batchCrafts(stepRecipe)
+        local remainingCrafts = totalCrafts
+        local stepTaskIds = {}
 
-        local deps = {}
-        for _, child in ipairs(node.children) do
-            local depIds = createTasks(child)
-            if depIds then
-                for _, depId in ipairs(depIds) do
-                    table.insert(deps, depId)
-                end
-            end
-        end
-
-        local batchItems = node.count
-        if node.recipe.type == "shaped" or node.recipe.type == "shapeless" then
-            local out = node.recipe.output or 1
-            local batch = self:batchCrafts(node.recipe)
-            -- U4: ровная балансировка больших заказов между всеми воркерами.
-            -- Ограничиваем размер батча так, чтобы число задач >= числа воркеров,
-            -- иначе большой заказ ушёл бы 1-2 огромными батчами на 1-2 черепахи.
-            local totalCrafts = math.ceil(node.count / out)
-            local workers = math.max(1, self:workerCount())
-            local perWorker = math.max(1, math.ceil(totalCrafts / workers))
-            local perTask = math.min(batch, perWorker)
-            batchItems = perTask * out
-        end
-
-        local tids = {}
-        local remaining = node.count
-        while remaining > 0 do
-            local countPart = math.min(remaining, batchItems)
-            remaining = remaining - countPart
-
-            local tid = newTaskId()
+        while remainingCrafts > 0 do
+            local batchCrafts = math.min(batch, remainingCrafts)
+            local batchCount = batchCrafts * output
             local task = {
-                id = tid,
-                recipe = node.recipe,
-                count = countPart,
+                id = newTaskId(),
+                recipe = stepRecipe,
+                count = batchCount,
+                requested = batchCount,
+                crafts = batchCrafts,
                 status = "queued",
                 attempts = 0,
+                step = step,
                 progress = 0,
                 result = nil,
-                dependencies = deps,
+                dependencies = {},
+                dependents = {},
+                worker_id = nil,
+                batch_index = (#stepTaskIds + 1),
+                batch_total = math.ceil(totalCrafts / batch),
+                reservation_id = nil,
+                plan = nil,
+                task_type = stepRecipe.type,
+                created_at = now(),
+                updated_at = now(),
+                source_id = id,
+                requested_root = count,
             }
-            self.tasks[tid] = task
-            table.insert(tids, tid)
-            table.insert(taskIds, tid)
-            table.insert(self.queue, tid)
-            emit(self, "task_queued", { id = tid, recipe = node.recipe.id, count = countPart })
+            if prevTaskId then
+                task.dependencies[#task.dependencies + 1] = prevTaskId
+                self.tasks[prevTaskId].dependents[#self.tasks[prevTaskId].dependents + 1] = task.id
+            end
+            self.tasks[task.id] = task
+            self.queue[#self.queue + 1] = task.id
+            taskIds[#taskIds + 1] = task.id
+            stepTaskIds[#stepTaskIds + 1] = task.id
+            prevTaskId = task.id
+            remainingCrafts = remainingCrafts - batchCrafts
+            emit(self, "task_queued", { id = task.id, recipe = stepRecipe.id, count = batchCount })
         end
-
-        nodeToTaskIds[node] = tids
-        return tids
+        batchMap[stepRecipe.id] = stepTaskIds
     end
-
-    createTasks(tree)
 
     if #taskIds == 0 then
         return {}, "Already in storage"
     end
 
+    self:markDirty()
+    self:save()
     emit(self, "craft_planned", { id = id, count = count, steps = #taskIds })
     return taskIds, "Planned steps: " .. #taskIds
+end
+
+----------------------------------------------------------------
+-- JOB EXECUTION HELPERS
+----------------------------------------------------------------
+
+function dispatcher:taskAlreadySatisfied(task)
+    if not task or not task.recipe or not task.recipe.id then return false end
+    local have = self.storage and self.storage:count(task.recipe.id) or 0
+    return have >= (task.requested or task.count or 0)
+end
+
+function dispatcher:ensureTaskReservation(task, tree)
+    if not self.storage then return true end
+    if task.reservation_id or task._reservations then return true end
+    local ok, err = self:reserveForTask(task, tree)
+    if not ok then return false, err end
+    return true
+end
+
+function dispatcher:prepareIngredients(workerId, task)
+    local cfg = config.load()
+    local mode = cfg.transfer_mode or self.transport_mode or "buffer"
+    task.transfer_mode = mode
+
+    if mode == "wired" then
+        local ok, dataOrErr = self:prepareWiredTask(workerId, task)
+        if not ok then
+            return false, dataOrErr
+        end
+        return true, dataOrErr
+    end
+
+    local ok, dataOrErr = self:prepareBufferTask(workerId, task)
+    if not ok then
+        return false, dataOrErr
+    end
+    return true, dataOrErr
+end
+
+function dispatcher:collectResult(workerId)
+    local w = self.workers[workerId]
+    if not w then return 0, 0 end
+    local cfg = config.load()
+    local mode = cfg.transfer_mode or self.transport_mode or "buffer"
+    if mode == "wired" then
+        local turtleName = self:workerName(workerId)
+        if not turtleName then return 0, 0 end
+        local p = peripheral.wrap(turtleName)
+        if not p or not p.list then return 0, 0 end
+        local ok, list = pcall(p.list)
+        if not ok or not list then return 0, 0 end
+        local total = 0
+        for slot in pairs(list) do
+            local moved = self.storage and self.storage:deposit(turtleName, slot, nil) or 0
+            total = total + moved
+        end
+        local leftover = 0
+        local okL, list2 = pcall(p.list)
+        if okL and list2 then
+            for _, item in pairs(list2) do leftover = leftover + (item.count or 0) end
+        end
+        return total, leftover
+    end
+
+    local buffer = w.buffer
+    if not buffer or not buffer.output then return 0, 0 end
+    local outChest = buffer.output
+    local p = peripheral.wrap(outChest)
+    if not p or type(p.list) ~= "function" then return 0, 0 end
+    local ok, list = pcall(p.list)
+    if not ok or not list then return 0, 0 end
+    local total = 0
+    for slot, item in pairs(list) do
+        if item and item.count and item.count > 0 then
+            total = total + (self.storage and self.storage:deposit(outChest, slot, nil) or 0)
+        end
+    end
+    local leftover = 0
+    local ok2, list2 = pcall(p.list)
+    if ok2 and list2 then
+        for _, item in pairs(list2) do leftover = leftover + (item.count or 0) end
+    end
+    return total, leftover
+end
+
+----------------------------------------------------------------
+-- MESSAGE HANDLING
+----------------------------------------------------------------
+
+function dispatcher:handleMessage(senderId, msg)
+    if not msg or not msg.type then return end
+    local payload = msg.payload or {}
+    local w = self.workers[senderId]
+
+    if msg.type == net.MSG.HELLO or msg.type == net.MSG.WORKER_HELLO then
+        self:addWorker(senderId, payload)
+        local worker = self.workers[senderId]
+        worker.ready = payload.ready ~= false
+        worker.busy = payload.busy == true
+        worker.current_task_id = payload.current_task_id
+        worker.last_seen = now()
+        if payload.buffer then worker.buffer = payload.buffer end
+        if payload.core and payload.core ~= os.getComputerID() then
+            net.send(senderId, net.MSG.DISCOVER, { core = os.getComputerID() })
+        end
+        return
+    elseif msg.type == net.MSG.BYE or msg.type == net.MSG.WORKER_BYE then
+        self:removeWorker(senderId)
+        return
+    elseif msg.type == net.MSG.PONG then
+        if w then w.last_seen = now() end
+        return
+    elseif msg.type == net.MSG.PING then
+        net.send(senderId, net.MSG.PONG, { task_id = payload.task_id, busy = w and w.busy or false, current_task_id = w and w.current_task and w.current_task.id or nil })
+        return
+    elseif msg.type == net.MSG.HEARTBEAT then
+        if w then
+            w.last_seen = now()
+            if payload.task_id and w.current_task and payload.task_id == w.current_task.id then
+                w.busy = payload.busy == true
+                w.current_task_id = payload.current_task_id or payload.task_id
+            elseif payload.current_task_id and w.current_task and payload.current_task_id == w.current_task.id then
+                w.busy = payload.busy == true
+            elseif payload.busy == false and w.state == "busy" then
+                local age = w.task_started_at and (now() - w.task_started_at) or 9999
+                if age > self.heartbeat_grace then
+                    if w.current_task then self:requeue(w.current_task, "stale_heartbeat") end
+                    w.state = "free"
+                    w.current_task = nil
+                    w.busy = false
+                    w.current_task_id = nil
+                    w.task_started_at = nil
+                    w.task_deadline = nil
+                end
+            end
+        end
+        return
+    elseif msg.type == net.MSG.CRAFT_ACK then
+        local task = payload.task_id and self.tasks[payload.task_id] or nil
+        if task then
+            task.acked = true
+            task.ack_time = now()
+            task.updated_at = now()
+            if w then w.last_seen = now() end
+        end
+        return
+    elseif msg.type == net.MSG.STATUS then
+        local task = payload.task_id and self.tasks[payload.task_id] or nil
+        if task then
+            task.progress = payload.progress or task.progress or 0
+            task.status_message = payload.message or task.status_message
+            task.updated_at = now()
+            emit(self, "task_progress", { id = task.id, progress = task.progress })
+        end
+        return
+    elseif msg.type == net.MSG.RESULT then
+        local task = payload.task_id and self.tasks[payload.task_id] or nil
+        if not task and w and w.current_task and payload.task_id == w.current_task.id then
+            task = w.current_task
+        end
+        if not task then return end
+        if payload.success then
+            task.status = "done"
+            task.result = payload
+            task.updated_at = now()
+            if self.storage and task.reservation_id then
+                self.storage:consumeReservation(task.reservation_id, task.count or 0)
+                task.reservation_id = nil
+            end
+            emit(self, "task_done", { id = task.id, recipe = task.recipe and task.recipe.id, count = payload.count or task.count, worker = senderId })
+        else
+            task.status = "failed"
+            task.result = payload
+            task.updated_at = now()
+            if self.storage and task.reservation_id then
+                self.storage:release(task.reservation_id)
+                task.reservation_id = nil
+            end
+            emit(self, "task_failed", { id = task.id, error = payload.error or "worker returned error" })
+            self:failDependents(task.id, payload.error or "worker returned error")
+        end
+        if w then
+            w.current_task = nil
+            w.current_task_id = nil
+            w.busy = false
+            w.state = "free"
+            w.task_started_at = nil
+            w.task_deadline = nil
+            w.buffer = w.buffer
+            w.last_seen = now()
+        end
+        removeValue(self.queue, task.id)
+        self._dirty = true
+        self:save()
+        return
+    end
+end
+
+----------------------------------------------------------------
+-- DISPATCH LOOP
+----------------------------------------------------------------
+
+function dispatcher:_dispatchTaskToWorker(workerId, task)
+    local cfg = config.load()
+    local mode = cfg.transfer_mode or self.transport_mode or "buffer"
+    task.updated_at = now()
+    task.sent_at = now()
+    task.ack_attempts = (task.ack_attempts or 0) + 1
+    task.ack_deadline = now() + math.max(1, cfg.net_timeout or 5)
+    task.acked = false
+
+    local payload = {
+        task_id = task.id,
+        recipe = task.recipe,
+        count = task.count,
+        crafts = task.crafts,
+        transfer_mode = mode,
+        buffer = nil,
+    }
+    if mode == "buffer" then
+        local ok, buff = self:prepareBufferTask(workerId, task)
+        if not ok then
+            return false, buff
+        end
+        payload.buffer = buff
+        task.buffer = buff
+        if self.workers[workerId] then self.workers[workerId].buffer = buff end
+    else
+        local ok, wired = self:prepareWiredTask(workerId, task)
+        if not ok then
+            return false, wired
+        end
+        payload.turtle = wired.turtle
+    end
+
+    net.send(workerId, net.MSG.CRAFT_REQUEST, payload)
+    task.worker_id = workerId
+    task.status = "running"
+    task.sent_at = now()
+    task.updated_at = now()
+
+    local w = self.workers[workerId]
+    if w then
+        w.state = "busy"
+        w.busy = true
+        w.current_task = task
+        w.current_task_id = task.id
+        w.task_started_at = now()
+        local crafts = task.crafts or math.ceil((task.count or 1) / math.max(1, task.recipe.output or 1))
+        local avg = (self.recipes and task.recipe and self.recipes.avgTimeFor and self.recipes.avgTimeFor(task.recipe)) or planner.DEFAULT_TIME.crafting
+        if type(avg) == "table" then avg = avg[1] or 1 end
+        w.task_deadline = math.max(60, (avg or 1) * crafts * 3)
+    end
+    emit(self, "task_started", { id = task.id, worker = workerId, recipe = task.recipe and task.recipe.id, count = task.count })
+    return true
+end
+
+function dispatcher:_readyQueue()
+    local ready = {}
+    for _, tid in ipairs(self.queue) do
+        local task = self.tasks[tid]
+        if task and task.status == "queued" and self:isTaskReady(task) then
+            ready[#ready + 1] = task
+        end
+    end
+    table.sort(ready, function(a, b)
+        if a.created_at == b.created_at then return a.id < b.id end
+        return a.created_at < b.created_at
+    end)
+    return ready
+end
+
+function dispatcher:_ackRetryLoop()
+    local cfg = config.load()
+    local timeout = math.max(1, cfg.net_timeout or 5)
+    for _, task in pairs(self.tasks) do
+        if task.status == "running" and not task.acked and task.ack_deadline > 0 and now() > task.ack_deadline then
+            if task.ack_attempts < 3 then
+                local workerId = task.worker_id
+                local w = workerId and self.workers[workerId] or nil
+                if workerId and w then
+                    task.ack_attempts = task.ack_attempts + 1
+                    task.ack_deadline = now() + timeout
+                    net.send(workerId, net.MSG.CRAFT_REQUEST, {
+                        task_id = task.id,
+                        recipe = task.recipe,
+                        count = task.count,
+                        crafts = task.crafts,
+                        transfer_mode = task.transfer_mode or cfg.transfer_mode or "buffer",
+                        buffer = w.buffer,
+                        retry = true,
+                    })
+                end
+            else
+                if task.worker_id and self.workers[task.worker_id] then
+                    self:requeue(task, "ack_timeout")
+                    local w = self.workers[task.worker_id]
+                    w.state = "free"
+                    w.busy = false
+                    w.current_task = nil
+                    w.current_task_id = nil
+                    w.task_started_at = nil
+                    w.task_deadline = nil
+                end
+            end
+        end
+    end
+end
+
+function dispatcher:tick()
+    self.transport_mode = (config.load().transfer_mode or self.transport_mode or "buffer")
+    self:_ackRetryLoop()
+
+    -- Retrying drain of workers that had leftovers.
+    for id, w in pairs(self.workers) do
+        if w.state == "draining" then
+            local _, leftover = self:collectResult(id)
+            if (leftover or 0) <= 0 then
+                w.state = "free"
+                w.busy = false
+                w.current_task = nil
+                w.current_task_id = nil
+                emit(self, "worker_drain_done", { id = id })
+            end
+        end
+    end
+
+    local ready = self:_readyQueue()
+    if #ready == 0 then
+        self:save()
+        return
+    end
+
+    local freeWorkers = {}
+    for id, w in pairs(self.workers) do
+        if w.state == "free" and w.ready ~= false then
+            freeWorkers[#freeWorkers + 1] = id
+        end
+    end
+    table.sort(freeWorkers)
+
+    local idx = 1
+    while #ready > 0 and idx <= #freeWorkers do
+        local workerId = freeWorkers[idx]
+        local task = table.remove(ready, 1)
+        removeValue(self.queue, task.id)
+        if task.attempts >= self.maxAttempts then
+            task.status = "failed"
+            task.result = { success = false, error = "max attempts exceeded" }
+            emit(self, "task_failed", { id = task.id, error = "max attempts exceeded" })
+        else
+            local ok, prep = self:prepareIngredients(workerId, task)
+            if not ok then
+                task.attempts = task.attempts + 1
+                if task.attempts >= self.maxAttempts then
+                    task.status = "failed"
+                    task.result = { success = false, error = prep }
+                    emit(self, "task_failed", { id = task.id, error = prep })
+                    self:failDependents(task.id, prep)
+                else
+                    task.status = "queued"
+                    self.queue[#self.queue + 1] = task.id
+                    emit(self, "task_retry", { id = task.id, error = prep })
+                end
+            else
+                task.attempts = task.attempts + 1
+                local sent, err = self:_dispatchTaskToWorker(workerId, task)
+                if not sent then
+                    task.status = "queued"
+                    self.queue[#self.queue + 1] = task.id
+                    task.attempts = math.max(0, task.attempts - 1)
+                    emit(self, "task_retry", { id = task.id, error = err or "dispatch failed" })
+                end
+            end
+        end
+        idx = idx + 1
+        if idx % 4 == 0 then os.sleep(0) end
+    end
+
+    self:save()
+end
+
+function dispatcher:checkTimeouts(timeout)
+    timeout = timeout or 60
+    local ts = now()
+    for id, w in pairs(self.workers) do
+        if w.state == "busy" then
+            if (ts - (w.last_seen or ts)) > timeout then
+                if w.current_task then
+                    self:requeue(w.current_task, "worker_dead")
+                    emit(self, "task_timeout", { id = w.current_task.id, worker = id, reason = "worker_dead" })
+                end
+                w.state = "free"
+                w.busy = false
+                w.current_task = nil
+                w.current_task_id = nil
+                w.task_started_at = nil
+                w.task_deadline = nil
+            elseif w.task_started_at and (ts - w.task_started_at) > (w.task_deadline or self.task_timeout) then
+                if w.current_task then
+                    self:requeue(w.current_task, "task_deadline")
+                    emit(self, "task_timeout", { id = w.current_task.id, worker = id, reason = "task_deadline" })
+                end
+                w.state = "free"
+                w.busy = false
+                w.current_task = nil
+                w.current_task_id = nil
+                w.task_started_at = nil
+                w.task_deadline = nil
+            end
+        elseif w.state == "draining" then
+            if (ts - (w.last_seen or ts)) > timeout then
+                w.state = "free"
+                w.busy = false
+                w.current_task = nil
+                w.current_task_id = nil
+            end
+        end
+    end
+    self:save()
 end
 
 return dispatcher

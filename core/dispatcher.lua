@@ -224,7 +224,7 @@ function dispatcher:serialize()
     local workers = {}
     for id, w in pairs(self.workers) do
         workers[id] = {
-            info = w.info,
+            info = util.deepCopy(w.info),
             state = w.state,
             current_task_id = w.current_task and w.current_task.id or nil,
             last_seen = w.last_seen,
@@ -234,7 +234,7 @@ function dispatcher:serialize()
             ready = w.ready,
             task_started_at = w.task_started_at,
             task_deadline = w.task_deadline,
-            handshake = w.handshake,
+            handshake = util.deepCopy(w.handshake),
             current_task_id_reported = w.current_task_id,
             transfer_mode = w.transfer_mode,
         }

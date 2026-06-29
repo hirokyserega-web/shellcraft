@@ -88,14 +88,22 @@ end
 --- Сохранение данных.
 function util.saveData(path, data)
     util.ensureDir(fs.getDir(path))
-    local f = fs.open(path, "w")
-    if not f then return false, "Не удалось открыть " .. path end
-    -- Try modern serialize with repeated entries support
-    local ok, content = pcall(textutils.serialize, data, { compact = false, allow_repeated = true })
+    -- identity-breaking deep copy to guarantee NO shared references for textutils.serialize
+    local safeData = util.deepCopy(data)
+    
+    local ok, res = pcall(textutils.serialize, safeData, { compact = false, allow_repeated = true })
+    local content = res
     if not ok then
-        -- Fallback for older versions
-        content = textutils.serialize(data)
+        ok, res = pcall(textutils.serialize, safeData)
+        content = res
     end
+    
+    if not ok or not content then
+        return false, "Serialization failed: " .. tostring(content)
+    end
+
+    local f = fs.open(path, "w")
+    if not f then return false, "Cannot open file for writing: " .. path end
     f.write(content)
     f.close()
     return true

@@ -143,11 +143,7 @@ function recipes:load()
 end
 
 function recipes:save()
-    local f = fs.open(self.path, "w")
-    if not f then return false end
-    f.write(textutils.serialize(self.list))
-    f.close()
-    return true
+    return util.saveData(self.path, self.list)
 end
 
 function recipes:add(recipe)
@@ -161,7 +157,7 @@ function recipes:add(recipe)
         recipe.samples = old.samples
         recipe.timingCount = old.timingCount
     end
-    self.list[recipe.id] = recipe
+    self.list[recipe.id] = util.deepCopy(recipe)
     self:save()
     return true
 end

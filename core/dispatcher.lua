@@ -194,14 +194,64 @@ function dispatcher:serialize()
     for id, task in pairs(self.tasks) do
         tasks[id] = {
             id = task.id,
-            recipe = util.deepCopy(task.recipe),
+            recipe = task.recipe,
             count = task.count,
             status = task.status,
             attempts = task.attempts,
-            step = util.deepCopy(task.step), -- important
+            step = task.step,
             progress = task.progress,
-            result = util.deepCopy(task.result),
-            dependencies = util.deepCopy(task.dependencies or {}),
+            result = task.result,
+            dependencies = task.dependencies,
+            dependents = task.dependents,
+            worker_id = task.worker_id,
+            batch_index = task.batch_index,
+            batch_total = task.batch_total,
+            reservation_id = task.reservation_id,
+            plan = task.plan,
+            task_type = task.task_type,
+            created_at = task.created_at,
+            updated_at = task.updated_at,
+            requested = task.requested,
+            crafts = task.crafts,
+            requested_root = task.requested_root,
+            source_id = task.source_id,
+            transfer_mode = task.transfer_mode,
+            concrete_recipe = task.concrete_recipe,
+            reservation_key = task.reservation_key,
+            _resById = task._resById,
+        }
+    end
+    local workers = {}
+    for id, w in pairs(self.workers) do
+        workers[id] = {
+            info = w.info,
+            state = w.state,
+            current_task_id = w.current_task and w.current_task.id or nil,
+            last_seen = w.last_seen,
+            buffer = w.buffer,
+            turtle_name = w.turtle_name,
+            busy = w.busy,
+            ready = w.ready,
+            task_started_at = w.task_started_at,
+            task_deadline = w.task_deadline,
+            handshake = w.handshake,
+            current_task_id_reported = w.current_task_id,
+            transfer_mode = w.transfer_mode,
+        }
+    end
+    local queue = {}
+    for i, tid in ipairs(self.queue) do queue[i] = tid end
+    return {
+        version = 2,
+        transport_mode = self.transport_mode,
+        seq = seq,
+        rrCursor = self._rrCursor,
+        tasks = tasks,
+        queue = queue,
+        workers = workers,
+        reservations = self.storage and self.storage:reservationSnapshot() or {},
+    }
+endencies = util.deepCopy(task.dependencies or {}),
             dependents = util.deepCopy(task.dependents or {}),
             worker_id = task.worker_id,
             batch_index = task.batch_index,

@@ -88,15 +88,29 @@ end
 --- Сохранение данных.
 function util.saveData(path, data)
     util.ensureDir(fs.getDir(path))
-    -- CC:T 1.100+ support options table as 2nd arg. allow_repeated=true prevents failure on shared refs.
-    local ok, res = pcall(textutils.serialize, data, { compact = false, allow_repeated = true })
-    local content = res
-    if not ok or type(content) ~= "string" then
-        -- Fallback: identity-breaking deep copy to guarantee NO shared references
-        local safeData = util.deepCopy(data)
+    
+    -- We must break ALL shared references because textutils.serialize (old versions) 
+    -- will throw "repeated entries" even if they are not circular.
+    -- util.deepCopy(data) creates a new table tree where every node is unique.
+    local safeData = util.deepCopy(data)
+    
+    -- Attempt serialization. Use pcall to catch "repeated entries" or other errors.
+    local ok, res = pcall(textutils.serialize, safeData, { compact = false, allow_repeated = true })
+    if not ok or type(res) ~= "string" then
+        -- Fallback for very old versions or if something went wrong
         ok, res = pcall(textutils.serialize, safeData)
-        content = res
     end
+    
+    if not ok or type(res) ~= "string" then
+        return false, "Serialization failed: " .. tostring(res)
+    end
+
+    local f = fs.open(path, "w")
+    if not f then return false, "Cannot open " .. path end
+    f.write(res)
+    f.close()
+    return true
+end
     
     if not ok or type(content) ~= "string" then
         return false, "Serialization failed: " .. tostring(content)

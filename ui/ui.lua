@@ -2304,6 +2304,19 @@ function ui:renderRecipes(yTop, yBot, w)
                     yLine = yLine + 1
                 end
             end
+            
+            -- Visual grid for shaped recipes
+            if r.type == "shaped" and r.pattern then
+                local gridX = startX + wRight - 8
+                local gridY = yTop + 5
+                for row = 1, 3 do
+                    local rowStr = ""
+                    for col = 1, 3 do
+                        rowStr = rowStr .. (r.pattern[row] and r.pattern[row][col] and "[#]" or "[ ]")
+                    end
+                    widgets.text(gridX, gridY + row - 1, rowStr, colors.cyan, colors.black)
+                end
+            end
         else
             widgets.center(math.floor((yTop + yBot) / 2), "No recipe selected", colors.gray)
         end

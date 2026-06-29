@@ -397,6 +397,32 @@ end
 -- ОБУЧЕНИЕ
 ----------------------------------------------------------------
 
+--- Сдвинуть рецепт в верхний левый угол 3x3.
+local function minifyPattern(pattern)
+    local minRow, maxRow = 4, 0
+    local minCol, maxCol = 4, 0
+    local hasAny = false
+    for r = 1, 3 do
+        for c = 1, 3 do
+            if pattern[r] and pattern[r][c] then
+                hasAny = true
+                if r < minRow then minRow = r end
+                if r > maxRow then maxRow = r end
+                if c < minCol then minCol = c end
+                if c > maxCol then maxCol = c end
+            end
+        end
+    end
+    if not hasAny then return pattern end
+    local new = { {}, {}, {} }
+    for r = minRow, maxRow do
+        for c = minCol, maxCol do
+            new[r - minRow + 1][c - minCol + 1] = pattern[r][c]
+        end
+    end
+    return new
+end
+
 function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
     local pattern = {}
     for row = 0, 2 do
@@ -405,7 +431,9 @@ function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
             local idx = row * 3 + col
             local s = slots[idx]
             if s and s.id then
-                r[col] = { id = s.id, count = s.count or 1 }
+                -- Для shaped-крафта в MC всегда потребляется 1 предмет на слот.
+                -- Игнорируем стаки при обучении, чтобы не ломать логику воркера.
+                r[col] = { id = s.id, count = 1 }
             end
         end
         pattern[#pattern + 1] = r
@@ -415,7 +443,7 @@ function recipes.buildFromTurtle(slots, resultId, resultCount, resultName)
         name = resultName,
         type = "shaped",
         output = resultCount or 1,
-        pattern = pattern,
+        pattern = minifyPattern(pattern),
         schema_version = recipes.SCHEMA_VERSION,
     }
 end

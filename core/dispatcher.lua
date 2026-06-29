@@ -238,7 +238,12 @@ function dispatcher:prepareIngredients(workerId, task)
             self.storage:refreshEmptySlots()
             self:collectResult(workerId)
             if turtleHasItems() then
-                return false, "Could not clear turtle (storage full?) before crafting"
+                -- Y4: различаем "хранилище забито" и "черепаха заблокирована".
+                local free = self.storage:refreshEmptySlots()
+                if not free or #free == 0 then
+                    return false, "Storage full: no free slots to offload turtle before crafting"
+                end
+                return false, "Turtle blocked: could not clear inventory before crafting (items stuck in turtle)"
             end
         end
     end
@@ -333,16 +338,39 @@ end
 --- Забрать ВСЕ предметы из инвентаря черепахи в хранилище (результат + остатки).
 function dispatcher:collectResult(workerId)
     local turtleName = self:workerName(workerId)
-    if not turtleName then return 0 end
+    if not turtleName then return 0, 0 end
     local p = peripheral.wrap(turtleName)
-    if not p or not p.list then return 0 end
+    if not p or not p.list then return 0, 0 end
     local ok, list = pcall(p.list)
-    if not ok or not list then return 0 end
+    if not ok or not list then return 0, 0 end
     local total = 0
+    local refreshed = false
     for slot, _ in pairs(list) do  -- только реально занятые слоты
-        total = total + self.storage:deposit(turtleName, slot, nil)
+        local moved = self.storage:deposit(turtleName, slot, nil)
+        if moved == 0 then
+            -- Y3: непустой слот не принят -> кэш пустых слотов мог протухнуть.
+            -- Освежить ОДИН раз и повторить этот слот.
+            if not refreshed then
+                self.storage:refreshEmptySlots()
+                refreshed = true
+            end
+            moved = self.storage:deposit(turtleName, slot, nil)
+        end
+        total = total + moved
     end
-    return total
+    -- Сколько реально осталось в черепахе после выгрузки.
+    local leftover = 0
+    local okL, list2 = pcall(p.list)
+    if okL and list2 then
+        for _, item in pairs(list2) do
+            leftover = leftover + (item.count or 0)
+        end
+    end
+    if leftover > 0 then
+        util.warn(string.format("Storage full: could not offload %d items from %s",
+            leftover, turtleName))
+    end
+    return total, leftover
 end
 
 function dispatcher:isTaskReady(task)
@@ -383,6 +411,19 @@ end
 
 --- Один тик планировщика.
 function dispatcher:tick()
+    -- Y3: retry offloading any workers left "draining" (storage was full when
+    -- their result came back). When fully drained, return them to the free pool.
+    for id, w in pairs(self.workers) do
+        if w.state == "draining" then
+            local _, leftover = self:collectResult(id)
+            if (leftover or 0) <= 0 then
+                w.state = "free"
+                util.info("Worker #" .. tostring(id) .. " drained, back to free pool")
+                pcall(os.queueEvent, "shellcraft_dispatch")
+            end
+        end
+    end
+
     if #self.queue == 0 then return end
 
     -- 1. Обработать ready-задачи типа "machine"/"station" (без участия воркеров)
@@ -565,8 +606,10 @@ function dispatcher:handleMessage(senderId, msg)
             end
         end
         if task then
+            local leftover = 0
             if p.success then
-                self:collectResult(senderId)
+                local _, lo = self:collectResult(senderId)
+                leftover = lo or 0
                 task.status = "done"
                 task.result = p
                 -- Обновляем avgTime рецепта (время на 1 крафт черепахи)
@@ -576,7 +619,8 @@ function dispatcher:handleMessage(senderId, msg)
                 emit(self, "task_done", { id = task.id, recipe = task.recipe.id, count = p.count })
             else
                 -- При ошибке тоже забираем остатки
-                self:collectResult(senderId)
+                local _, lo = self:collectResult(senderId)
+                leftover = lo or 0
                 task.status = "failed"
                 task.result = p
                 local err = p.error or "worker returned error"
@@ -585,10 +629,19 @@ function dispatcher:handleMessage(senderId, msg)
             end
             -- Free the worker (only if this worker was assigned to the task)
             if w then
-                w.state = "free"
                 w.current_task = nil
                 w.task_started_at = nil
                 w.task_deadline = nil
+                if leftover > 0 then
+                    -- Y3: storage could not absorb everything -> turtle still holds
+                    -- items. Keep it "draining" (not dispatchable) and retry the
+                    -- offload on the next tick instead of silently continuing.
+                    w.state = "draining"
+                    util.warn(string.format("Worker #%s left draining: %d items still onboard (storage full?)",
+                        tostring(senderId), leftover))
+                else
+                    w.state = "free"
+                end
                 -- Событийная побудка планировщика: дораздать задачу освободившейся черепахе сразу
                 pcall(os.queueEvent, "shellcraft_dispatch")
             end

@@ -158,6 +158,85 @@ local function dumpExtraSlots()
     return "EXTRA slots: " .. table.concat(parts, ", ")
 end
 
+local function ingredientSet(recipe)
+    local set = {}
+    local function add(id)
+        if id then set[id] = true end
+    end
+    if recipe and recipe.type == "shaped" and recipe.pattern then
+        for _, row in ipairs(recipe.pattern) do
+            if row then
+                for _, cell in ipairs(row) do
+                    if cell then
+                        if type(cell) == "table" then
+                            add(cell.id)
+                        else
+                            add(cell)
+                        end
+                    end
+                end
+            end
+        end
+    elseif recipe and recipe.type == "shapeless" and recipe.ingredients then
+        for _, ing in ipairs(recipe.ingredients) do
+            if type(ing) == "table" then
+                add(ing.id)
+            else
+                add(ing)
+            end
+        end
+    elseif recipe and (recipe.type == "station" or recipe.type == "machine") and recipe.itemInput then
+        for _, ing in ipairs(recipe.itemInput) do
+            add(ing.id)
+        end
+    elseif recipe and recipe.type == "machine" and recipe.input then
+        for _, ing in ipairs(recipe.input) do
+            if type(ing) == "table" then
+                add(ing.id)
+            else
+                add(ing)
+            end
+        end
+    end
+    return set
+end
+
+local function evacuateForeignItems(recipe)
+    local allowed = ingredientSet(recipe)
+    for slot = 1, 16 do
+        local detail = turtle.getItemDetail(slot)
+        if detail and not allowed[detail.name] then
+            dropToExternal(slot)
+        end
+    end
+    for slot = 1, 16 do
+        local detail = turtle.getItemDetail(slot)
+        if detail and not allowed[detail.name] then
+            return false, "turtle blocked: could not evacuate foreign item from slot " .. slot .. " (" .. detail.name .. ")"
+        end
+    end
+    return true
+end
+
+local function outputCapacityFor(recipeId)
+    local capacityItems = 0
+    local freeSlots = 0
+    for _, s in ipairs(EXTRA_SLOTS) do
+        local detail = turtle.getItemDetail(s)
+        if not detail then
+            capacityItems = capacityItems + 64
+            freeSlots = freeSlots + 1
+        elseif detail.name == recipeId then
+            local space = turtle.getItemSpace(s) or 0
+            if space > 0 then
+                capacityItems = capacityItems + space
+                freeSlots = freeSlots + 1
+            end
+        end
+    end
+    return capacityItems, freeSlots
+end
+
 --- Разложить ингредиенты по shaped pattern (слоты 1-9).
 -- @param recipe рецепт с .pattern (3x3)
 -- @param crafts сколько крафтов
@@ -299,39 +378,58 @@ function worker:craft(recipe, count)
     local crafts = math.ceil(count / output)
     self.crafting = true
 
+    -- Y2: evacuate ALL foreign items (leftover results, junk like map/firework/
+    -- flint) so they don't accumulate and block output space. Keep only the
+    -- current recipe's ingredients.
+    local evOk, evErr = evacuateForeignItems(recipe)
+    if not evOk then
+        self.crafting = false
+        return false, evErr
+    end
+
     local t0 = os.epoch("utc")
     local totalCrafted = 0
     local remainingCrafts = crafts
     local stepNum = 1
     while remainingCrafts > 0 do
-        local occupied = 0
-        for _, s in ipairs(EXTRA_SLOTS) do
-            if turtle.getItemCount(s) > 0 then
-                occupied = occupied + 1
-            end
-        end
-        if occupied >= 6 then
-            for _, s in ipairs(EXTRA_SLOTS) do
-                if turtle.getItemCount(s) > 0 then
-                    dropToExternal(s)
-                end
-            end
-            occupied = 0
-            for _, s in ipairs(EXTRA_SLOTS) do
-                if turtle.getItemCount(s) > 0 then
-                    occupied = occupied + 1
-                end
-            end
-            if occupied >= 6 then
-                self.crafting = false
-                return false, "turtle inventory full, reduce batch size"
-            end
-        end
-
         local maxChunk = math.floor(64 / (recipe.output or 1))
         if maxChunk < 1 then maxChunk = 1 end
         local chunk = math.min(maxChunk, remainingCrafts)
-        
+
+        -- Y1: guarantee room for the crafted output BEFORE laying out ingredients.
+        -- We need ceil(chunk*output / 64) free/partial EXTRA slots for this item,
+        -- counting space left in an existing stack of the same id.
+        local function fitsChunk(c)
+            local capacityItems = outputCapacityFor(recipe.id)
+            return capacityItems >= c * output, capacityItems
+        end
+
+        local fits, capItems = fitsChunk(chunk)
+        if not fits then
+            -- First: offload everything that is NOT an ingredient of THIS recipe.
+            local allowed = ingredientSet(recipe)
+            for _, s in ipairs(EXTRA_SLOTS) do
+                local detail = turtle.getItemDetail(s)
+                if detail and not allowed[detail.name] then
+                    dropToExternal(s)
+                end
+            end
+            fits, capItems = fitsChunk(chunk)
+        end
+
+        if not fits then
+            -- Still no room: shrink chunk to what the free output space allows.
+            local maxBySpace = math.floor(capItems / output)
+            if maxBySpace < 1 then
+                self.crafting = false
+                local _, freeSlots = outputCapacityFor(recipe.id)
+                util.warn("craft blocked: need room for " .. (chunk * output) ..
+                    " output, free output items=" .. capItems .. ", free slots=" .. freeSlots)
+                return false, "no room for crafted output (turtle inventory full) - collect results first"
+            end
+            chunk = math.min(chunk, maxBySpace)
+        end
+
         -- 1. Layout chunk worth of ingredients
         local lok, lerr
         if recipe.type == "shaped" then
@@ -363,6 +461,9 @@ function worker:craft(recipe, count)
                 if d then dump[#dump+1] = "slot" .. s .. "=" .. d.name .. "x" .. d.count end
             end
             local gridStr = #dump > 0 and table.concat(dump, ", ") or "empty"
+            local capItems, freeSlots = outputCapacityFor(recipe.id)
+            util.warn("craft blocked: need room for " .. (chunk * output) ..
+                " output, free output items=" .. capItems .. ", free slots=" .. freeSlots)
             return false, "turtle.craft rejected step " .. stepNum ..
                 " (recipe " .. tostring(recipe.id) .. "): " .. tostring(reason) .. " | grid: " .. gridStr
         end

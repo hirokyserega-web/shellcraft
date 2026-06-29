@@ -38,7 +38,9 @@ updater.FILES = {
     "ui/ui.lua",
     "ui/widgets.lua",
     "lang/ru.lua",
+    "lang/errors.lua",
     "lib/net.lua",
+    "lib/itemmatch.lua",
     "lib/util.lua",
     "lib/names.lua",
     "tools/gen_lang.lua",
@@ -65,6 +67,27 @@ function updater.localVersion()
     local v = f.readAll()
     f.close()
     return (v:gsub("%s", ""))
+end
+
+--- Проверить queue.dat на наличие running/queued задач. Если есть — отложить
+--- авто-обновление: иначе os.reboot() убьёт задачи и оставит воркеров в
+--- неконсистентном состоянии (зарезервированные ресурсы, занятые слоты буферов).
+function updater.hasActiveWork()
+    if not util.fileExists("queue.dat") then return false end
+    local ok, data = pcall(function()
+        return util.loadData("queue.dat", {})
+    end)
+    if not ok or type(data) ~= "table" then return false end
+    if type(data.tasks) ~= "table" then return false end
+    for _, task in pairs(data.tasks) do
+        if type(task) == "table" then
+            local st = task.status
+            if st == "running" or st == "queued" then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 --- Скачать текстовый файл с URL (с 3 попытками, кэш-бастингом и экспоненциальным бэкоффом).
@@ -165,6 +188,14 @@ function updater.update(baseUrl, force)
     if not force and not updater.isNewer(local_, remote) then
         util.ok("Update not required")
         return false, "up-to-date"
+    end
+
+    -- Не обновляемся, пока есть активные задачи крафта (если в queue.dat есть
+    -- running/queued задачи). Перезагрузка посреди крафта теряет рецепты и
+    -- оставляет воркеров в подвисшем состоянии.
+    if not force and updater.hasActiveWork() then
+        util.warn("Update deferred: active craft tasks in queue.dat")
+        return false, "active_work"
     end
 
     util.info("Downloading update...")
